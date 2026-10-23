@@ -30,6 +30,7 @@ const SCRIPTS = [
   'road-paint.js',
   'traffic.js',
   'scene-culling.js',
+  'ground.js',
   'guest.js'
 ];
 

@@ -33,6 +33,7 @@ function loadFrame() {
   const window = { NYC: { THREE: { Matrix4 }, TSL: {}, Addons: {} } };
   const context = vm.createContext({ window, Math });
   vm.runInContext(`${LL}; window.NYC.lonLatToWorld = LL;`, context);
+  vm.runInContext(read('js/ground.js'), context);
   vm.runInContext(read('js/guest.js'), context);
   return { frame: window.NYC.makeGeoFrame(), LL: window.NYC.lonLatToWorld };
 }
@@ -91,6 +92,7 @@ function loadGround(spacing = 100) {
   const window = { NYC: { THREE: { Matrix4 }, TSL: {}, Addons: {} } };
   const context = vm.createContext({ window, Math });
   vm.runInContext(`${LL}; window.NYC.lonLatToWorld = LL;`, context);
+  vm.runInContext(read('js/ground.js'), context);
   vm.runInContext(read('js/guest.js'), context);
   const frame = window.NYC.makeGeoFrame();
   const ground = window.NYC.makeGround(frame);
@@ -191,6 +193,7 @@ function loadGuest() {
   const window = { NYC: { THREE: { Matrix4 }, TSL: {}, Addons: {} } };
   const context = vm.createContext({ window, Math });
   vm.runInContext(`${LL}; window.NYC.lonLatToWorld = LL;`, context);
+  vm.runInContext(read('js/ground.js'), context);
   vm.runInContext(read('js/guest.js'), context);
   return window.NYC;
 }

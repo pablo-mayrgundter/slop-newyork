@@ -107,7 +107,7 @@ const Cesium = {
   }
 };
 
-// The guest's frame, from js/guest.js as it stands (as tests/guest.test.cjs loads it)
+// The guest's frame, from js/ground.js and js/guest.js as they stand (as tests/guest.test.cjs loads it)
 class ThreeMatrix4 {
   constructor() { this.elements = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]; }
   set(...n) {
@@ -120,6 +120,7 @@ function loadFrame() {
   const window = { NYC: { THREE: { Matrix4: ThreeMatrix4 }, TSL: {}, Addons: {} } };
   const context = vm.createContext({ window, Math });
   vm.runInContext(`${LL}; window.NYC.lonLatToWorld = LL;`, context);
+  vm.runInContext(read('js/ground.js'), context);
   vm.runInContext(read('js/guest.js'), context);
   return window.NYC.makeGeoFrame();
 }

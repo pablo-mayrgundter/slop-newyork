@@ -10,7 +10,7 @@
   <script>
     // Download the city scripts while Three.js loads; execute them only after its imports are ready below.
     const nycAppScripts = (() => {
-      const assetVersion = '20261022-teleports';
+      const assetVersion = '20261023-ground';
       return [
         './js/nyc-geodata.js',
         './js/city-config.js',
@@ -33,6 +33,7 @@
         './js/cameras.js',
         './js/nyc-map.js',
         './js/scene-culling.js',
+        './js/ground.js',
         './js/post-processing.js',
         './js/main.js'
       ].map((src) => `${src}?v=${assetVersion}`);
