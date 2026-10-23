@@ -22,7 +22,8 @@ code.
 |---|---|
 | What the project is, the live demo | [README.md](./README.md) |
 | How the app boots: script order, the three.js import map, `window.NYC` | [index.html](./index.html) (`nycAppScripts`, the import map, the module script that fills `window.NYC`), then [js/main.js](./js/main.js) `initApp` |
-| The city as a guest in another engine (a NetGL guest of a globe) | README [As a guest in another engine](./README.md#as-a-guest-in-another-engine); [js/guest.js](./js/guest.js) (its header and the `THE FRAME ON THE EARTH`, `THE GROUND` and `THE GUEST` sections); [js/guest-entry.mjs](./js/guest-entry.mjs); [guest.html](./guest.html), its demo page |
+| The city as a guest in another engine (a NetGL guest of a globe) | README [As a guest in another engine](./README.md#as-a-guest-in-another-engine); [js/guest.js](./js/guest.js) (its header, `THE HOST'S FRAME` and `THE GUEST`); [js/guest-entry.mjs](./js/guest-entry.mjs); [guest.html](./guest.html), its demo page |
+| The ground under the city (the frame on the Earth, heights, the lift, the drape, the lamps), shared by the guest and the app's `?ground=demo` | [js/ground.js](./js/ground.js): `THE FRAME ON THE EARTH`, `THE GROUND`, `THE DRAPE`, `THE DEMO GROUND`, `THE APP ON THE GROUND` |
 | The host side of the guest (recorder, replay, compositing) | [portal](https://github.com/pablo-mayrgundter/portal): its AGENTS.md and [portal-netgl DESIGN.md](https://github.com/pablo-mayrgundter/portal/blob/main/packages/portal-netgl/DESIGN.md) |
 | The world frame, lon/lat to world | [tools/geo-base.mjs](./tools/geo-base.mjs) section 1, FRAME; [js/boroughs.js](./js/boroughs.js) `LL()` |
 | The real geography and how it's built | [tools/build-geodata.mjs](./tools/build-geodata.mjs) and the `tools/geo-*.mjs` it imports; inputs in `tools/data/` (Overpass queries `q_*.overpassql`, fetched with `tools/overpass.sh`) |
@@ -48,8 +49,8 @@ code.
   `python3 -m http.server 8000`) and open `/`.
   - A new script goes into `nycAppScripts` at the point where what it
     reads from `window.NYC` is already defined.
-- **Tests:** `node --test tests/*.cjs tests/*.mjs` (115 tests, about
-  40 s). Plain `node --test tests/` fails, so use the globs. The tests
+- **Tests:** `node --test tests/*.cjs tests/*.mjs` (122 tests, about
+  45 s). Plain `node --test tests/` fails, so use the globs. The tests
   run the scripts in `node:vm` with stubs for `window.NYC`, three.js
   and the DOM, or parse index.html and the scripts as text. No GPU and
   no three.js download are needed.
@@ -66,12 +67,19 @@ code.
     app-only (then add it to the test's `APP_ONLY`).
   - The guest always runs on three's WebGL2 backend
     (`forceWebGL: true`), because NetGL records WebGL2.
+  - The ground's code (the frame, `makeGround`, the lift, the drape, the
+    lamps' lift, the demo hill) is js/ground.js, a classic script that
+    both index.html and `SCRIPTS` load and that runs nothing at load
+    (tests load it in `node:vm` with a stub of three that has only
+    `Matrix4`: make any other three object on first use). guest.js and
+    main.js only call it: don't copy ground code into either.
   - guest.html takes `?shadows=0` and `?extent=all` (the default,
     `manhattan`, leaves out the other boroughs and the harbour's water),
     `?lights=0` (no lamps, no ClusteredLighting), `?ground=demo`,
     `?view=aerial|street|park` and `?dpr=1`, and reads out fps, the frame
     time and the JS time in `update()` and `render()`. The app takes
-    `?webgl` to force the WebGL2 backend in a browser with WebGPU.
+    `?webgl` to force the WebGL2 backend in a browser with WebGPU, and
+    `?ground=demo` to drive over the demo hill.
   - A material's own `mrtNode` replaces its colour output when it draws
     into a render target with no MRT, and WebGL2 then rejects the draw
     ("Active draw buffers with missing fragment shader outputs"). The
@@ -148,9 +156,35 @@ code.
   Anything new that uses storage buffers, compute or `attributeArray`
   random access needs a WebGL2 path or a guard on
   `renderer.backend.isWebGPUBackend`.
+- **The app on a ground** (`index.html?ground=demo`, js/ground.js THE
+  APP ON THE GROUND): main.js makes `appGround` before the build (null
+  without the parameter, and every use is `if (appGround)`), takes the
+  layers before the culling set-up, attaches the lift before the shaders
+  compile, and calls `beforeRender(cameraSystem)` between the simulation
+  and the render. Things to know:
+  - The simulation, the physics, the colliders and the camera system all
+    stay flat. Only the drawing is lifted: the lamps each frame, and the
+    camera for the render only (cameras.js places it flat again each
+    frame, before anything else reads it; traffic.js's `updateView` calls
+    `camera.updateMatrixWorld()`, so the sim's frustum is the flat one).
+  - Its ground differs from a host's: no globe's curve (the app's 60 km
+    water plane is two triangles whose corners the curve would sink 70 m),
+    `height0` at the flat land so the shore and the water stay put, and
+    a grid reaching 7 km or more from the hill, where it's gone.
+    Only Manhattan's layers are split: draping 'Boroughs' too took
+    `setGround` from 4 s to 26 s headless and added 6.4 M triangles.
+  - It keeps the materials' `mrtNode`s (`prepareMaterials` `keepMRT`):
+    the scene pass's MRT for SSR and bloom joins them.
+  - `window.__NYC_APP.ground.stats` has the drape's numbers and
+    `setGroundMs`; the `[init]` log line has a `ground` step.
+  - The lift is the material's `positionNode`, which three applies after
+    instancing (NodeMaterial.setupPosition: `instancedMesh()` assigns
+    `positionLocal` from the instance matrix, an attribute on WebGL2 or a
+    storage buffer on WebGPU), so it sees each instance's position on
+    both backends.
 - **Shade by height above the street with `NYC.deckPosition()`**, not
   `positionWorld`. In the guest every vertex is lifted onto the host's
-  terrain (js/guest.js, THE GROUND), so `positionWorld.y` there is the
+  terrain (js/ground.js, THE GROUND), so `positionWorld.y` there is the
   lifted height. Patterns keyed to height above the deck (storeys,
   waterlines, lens colours, crevices) read `deckPosition()`, which takes
   the lift back off; in the app it is `positionWorld` itself. View
@@ -176,6 +210,15 @@ code.
     viewports (480×300 or less), shadows off where you can (guest.html
     `?shadows=0`), and read `canvas.toDataURL()` in the same task as
     the render. Put long runs in the background.
+  - Pixel diffs of the app: seed `Math.random` in an init script (and
+    reseed when the app's loop starts: the compile consumes a varying
+    amount), freeze `performance.now` once ready and set
+    `renderer._nodes.nodeFrame` `time` and `lastTime` (three's `time`
+    node, the water and the clouds), and gate the loop's callback
+    (wrap `WebGPURenderer.prototype.setAnimationLoop`, hooked from a
+    setter on `window.NYC`) to run N frames with synthetic timestamps.
+    Two builds then render bit for bit alike. `page.goto` with
+    `waitUntil: 'commit'`: the load event waits on the city's build.
   - The app is ready when `window.__NYC_APP.ready` is true. The guest
     page exposes the guest as `window.__NYC_GUEST`. Read state with
     `page.evaluate` rather than inferring it from pixels.

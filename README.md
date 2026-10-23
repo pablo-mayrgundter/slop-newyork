@@ -4,6 +4,8 @@ A New York City simulation built with [three.js](https://threejs.org/), WebGPURe
 
 [Try it live](https://mrdoob.github.io/slop-newyork/)
 
+[`?ground=demo`](https://pablo-mayrgundter.github.io/slop-newyork/?ground=demo) drives the city over a 40 m hill (a test ground)
+
 ## Make it your own
 
 Fork it, remix it, improve it, break it. Make games, animations, films, experiments, or something completely different. Use it as a starting point and take it wherever you want. Have fun!
@@ -61,7 +63,8 @@ const modelMatrix = cityModelMatrix(guest, Cesium);              // ENU at (lon0
 `cityModelMatrix` takes the city's frame to Cesium's Earth-fixed one; its inverse times the Cesium camera's
 `inverseViewMatrix` is the `matrixWorld` for `setView`. `seaLevel` defaults to −32.7 m (mean sea level over the WGS84
 ellipsoid at Manhattan, as in Cesium World Terrain). [`guest.html?ground=demo`](guest.html?ground=demo) drapes the city
-over a made-up 40 m hill on Midtown, with no host.
+over a made-up 40 m hill on Midtown, with no host, and [`index.html?ground=demo`](index.html?ground=demo) drives the app over
+the same hill (the ground's code, [`js/ground.js`](js/ground.js), is shared by the two).
 
 The lift moves vertices, and the city's flat layers at the street (the road deck, the seawall, the lawns, the
 sidewalks' slabs, the paint) are partly built from long triangles, which would cut straight through a hill. So
