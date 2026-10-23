@@ -208,6 +208,9 @@ function setupSceneCulling(scene, roots, shadow = null) {
     for (const root of roots) {
       root.traverse((o) => {
         if (!o.castShadow || !isStaticMesh(o) || !proxyableMaterial(o.material)) return;
+        // A ground layer (js/ground.js groundLayers: its flat geometry kept, split to follow the ground later) casts
+        // its own shadow: a stand-in, a copy of its flat geometry, wouldn't follow the ground
+        if (o.userData.flatGeometry) return;
         if (o.isInstancedMesh && o.count !== o.instanceMatrix.count) return;
         const tris = triangleCount(o.geometry) * (o.isInstancedMesh ? o.count : 1);
         if (tris < 20000) return;

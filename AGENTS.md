@@ -49,7 +49,7 @@ code.
   `python3 -m http.server 8000`) and open `/`.
   - A new script goes into `nycAppScripts` at the point where what it
     reads from `window.NYC` is already defined.
-- **Tests:** `node --test tests/*.cjs tests/*.mjs` (122 tests, about
+- **Tests:** `node --test tests/*.cjs tests/*.mjs` (123 tests, about
   45 s). Plain `node --test tests/` fails, so use the globs. The tests
   run the scripts in `node:vm` with stubs for `window.NYC`, three.js
   and the DOM, or parse index.html and the scripts as text. No GPU and
@@ -173,6 +173,18 @@ code.
     a grid reaching 7 km or more from the hill, where it's gone.
     Only Manhattan's layers are split: draping 'Boroughs' too took
     `setGround` from 4 s to 26 s headless and added 6.4 M triangles.
+  - Every face of a ground layer in the band follows the ground, its
+    underside too. An unsplit triangle is a chord of the hill: under the
+    ground on the crown, but over it past σ, where the hill is concave.
+    Central Park's extrusions had 4 km undersides that stood 4–11 m over
+    Sheep Meadow and north of it, a roof at a driver's eye, and their
+    shadow stand-ins shaded the meadow. The ground layers now cast their
+    own shadows (scene-culling.js skips `userData.flatGeometry`).
+    Undersides cost +0.42 M triangles (1.71 M to 2.13 M) and `setGround`
+    6.8 s to 11.5 s headless. To find such a layer, project each mesh's
+    triangle under a point with each corner lifted, and compare that
+    with the ground there plus its flat height. Look past the crown,
+    where the hill is concave.
   - It keeps the materials' `mrtNode`s (`prepareMaterials` `keepMRT`):
     the scene pass's MRT for SSR and bloom joins them.
   - `window.__NYC_APP.ground.stats` has the drape's numbers and

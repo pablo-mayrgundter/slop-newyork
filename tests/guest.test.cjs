@@ -360,11 +360,15 @@ test('the ground layers split until no edge spans more than the detail across th
   // the side splits along with the top's edge it shares, so it follows the ground too
   const side = tris.filter((t) => t.every((p) => p[2] === 0) && t.some((p) => p[1] > 0) && t.every((p) => p[1] <= 0.25));
   assert.ok(side.length >= 10 && side.every((t) => t.every((p, k) => lenXZ(p, t[(k + 1) % 3]) <= 20 + 1e-9)));
-  // attributes interpolate linearly; the face looking down and the tall wall are left whole
+  // attributes interpolate linearly; the face looking down splits as the top does (an underside left whole stands over
+  // its top where the ground is concave), still facing down; the tall wall is left whole
   for (let i = 0; i < pos.length / 3; i++) {
     assert.ok(Math.abs(out.attrs.uv[2 * i] - pos[3 * i] / 100) < 1e-6 && Math.abs(out.attrs.uv[2 * i + 1] - pos[3 * i + 2] / 60) < 1e-6);
   }
-  assert.equal(tris.filter(flat(0)).length, 1);
+  const down = tris.filter((t) => flat(0)(t) && t.some((p) => p[2] > 0));
+  assert.ok(down.length > 1 && down.every((t) => area(t) < 0));
+  for (const t of down) for (let k = 0; k < 3; k++) assert.ok(lenXZ(t[k], t[(k + 1) % 3]) <= 20 + 1e-9);
+  assert.ok(Math.abs(down.reduce((s, t) => s - area(t), 0) - 3000) < 1e-6);
   assert.equal(tris.filter((t) => t.some((p) => p[1] === 9)).length, 1);
   // nothing to split: null
   assert.equal(subdivideTriangles({ attrs: { position: { array: [0, 0, 0, 0, 0, 5, 5, 0, 0], itemSize: 3 } }, index: null, world: [0, 0, 0, 0, 0, 5, 5, 0, 0] }, 20), null);

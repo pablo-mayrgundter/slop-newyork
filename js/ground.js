@@ -234,11 +234,15 @@ function fillHoles(h, cols, rows) {
 // along their longest edge, until the ground is within DRAPE_TOLERANCE of each triangle at seven points over it (the
 // paint stands 12 mm over the deck), or it is under DRAPE_MIN_EDGE across; none stays longer than DRAPE_MAX_CELLS of
 // the ground's cells. Flat ground costs nothing, a hill what its bends need. The layers are the triangles at the street
-// (DRAPE_BAND, world y: buildings, lamps and trees leave it by their tops) of the ground's groups (DRAPE_ROOTS), but not
-// the faces looking down. The instanced slabs among them (the rectangular sidewalks and their curbs, up to ~500 m long,
-// the blocks' back yards) are baked into one mesh each when the guest is built. Each setGround() splits the layers again from their flat
-// geometry. The shadow stand-ins (scene-culling.js) are copies of the flat geometry: a curb's shadow on a hill can
-// stray by the curb's lift error.
+// (DRAPE_BAND, world y: buildings, lamps and trees leave it by their tops) of the ground's groups (DRAPE_ROOTS), the
+// faces looking down too. An underside left whole is a chord under its top where the ground is convex (the hill's
+// crown: hidden), but over it where the ground is concave (past σ, the hill's foot): Central Park's curb island, lawn,
+// wall and sidewalk are extrusions whose undersides are triangles 4 km long, and over Sheep Meadow and north of it
+// they stood 4-11 m over the lawn, a roof at a driver's eye that also shaded the meadow. The instanced slabs among the
+// layers (the rectangular sidewalks and their curbs, up to ~500 m long, the blocks' back yards) are baked into one mesh
+// each when the guest is built. Each setGround() splits the layers again from their flat geometry. The ground layers
+// cast their own shadows: the shadow stand-ins (scene-culling.js) are copies of the flat geometry, and the park's curb
+// island's hovered over the meadow as its underside did.
 // That detail is for a ground with a few smooth hills (the demo's). Real terrain bends a little everywhere: sampled
 // from Terrarium on a 100 m grid, the 4 mm tolerance split every layer down to a few metres across the whole island,
 // for minutes and gigabytes (the page hung). A host that sees the city from afar (a globe) passes setGround a coarser
@@ -259,7 +263,7 @@ const DRAPE_PROBES = [[1 / 3, 1 / 3], [0.5, 0], [0, 0.5], [0.5, 0.5], [2 / 3, 1 
 // (the corners' world x and z, and their longest edge's length in x, z), splitting each edge that is split in every
 // triangle that has it, so the mesh stays watertight. needsSplit may be a number: split while the longest edge is
 // longer. mesh: { attrs: { name: { array, itemSize } } per vertex, index (or null), world (x, y, z per vertex) }. A
-// triangle takes part when its corners' world y are within band and it doesn't face down. Every attribute is
+// triangle takes part when its corners' world y are within band, whichever way it faces. Every attribute is
 // interpolated linearly ('normal' renormalised). It stops before a pass that could take the mesh past maxTriangles (a
 // split edge adds at most two triangles). Returns null when nothing was split, else { attrs: { name: Float32Array },
 // index: Uint32Array, vertices, triangles, capped }
@@ -298,18 +302,7 @@ function subdivideTriangles(mesh, needsSplit, band = DRAPE_BAND, maxTriangles = 
     const b = tris[t + 1];
     const c = tris[t + 2];
     const [ay, by, cy] = [Y(a), Y(b), Y(c)];
-    // facing down: the normal's y under -0.5
-    const e1x = X(b) - X(a);
-    const e1y = by - ay;
-    const e1z = Z(b) - Z(a);
-    const e2x = X(c) - X(a);
-    const e2y = cy - ay;
-    const e2z = Z(c) - Z(a);
-    const nx = e1y * e2z - e1z * e2y;
-    const ny = e1z * e2x - e1x * e2z;
-    const nz = e1x * e2y - e1y * e2x;
-    const inBand = Math.min(ay, by, cy) >= band[0] && Math.max(ay, by, cy) <= band[1];
-    (inBand && ny >= -0.5 * Math.sqrt(nx * nx + ny * ny + nz * nz) ? active : kept).push(a, b, c);
+    (Math.min(ay, by, cy) >= band[0] && Math.max(ay, by, cy) <= band[1] ? active : kept).push(a, b, c);
   }
   const mid = (p, q) => {
     const v = count + addedW.length / 3;

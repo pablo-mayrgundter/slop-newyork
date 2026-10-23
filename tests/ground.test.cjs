@@ -80,3 +80,44 @@ test('the app keeps the materials\' own MRT outputs, which the guest drops', () 
   assert.equal(b.mrtNode, null);
   assert.equal(a.customProgramCacheKey(), 'k:ground');
 });
+
+test('a slab\'s underside follows the ground as its top does: over the hill\'s foot it stays under the top', () => {
+  const NYC = loadGround();
+  const frame = NYC.makeGeoFrame();
+  const app = NYC.makeGround(frame, { x0: -7500, x1: 7000, z0: -8500, z1: 7500 }, { curve: false });
+  const s = app.samples(40);
+  app.set(NYC.demoGroundHeights(s.lonLat, frame), { seaLevel: NYC.DEMO_SEA_LEVEL, height0: NYC.DEMO_SEA_LEVEL + 5 });
+  // No dip in the ground itself: Sheep Meadow (x -526, 66th St at z -1926) is on the hill's north flank, falling all
+  // the way from 59th St to 72nd St
+  for (let z = -1400; z > -2400; z -= 25) assert.ok(app.offsetAt(-526, z - 25) < app.offsetAt(-526, z), `${z}`);
+  // A slab 4 km long from 59th St north, as Central Park's curb island: a top 0.18 m up (facing up), an underside at 0
+  // (facing down), two triangles each
+  const [x0, x1, z0, z1] = [-600, -450, -5400, -1400];
+  const corners = [[x0, z0], [x0, z1], [x1, z1], [x1, z0]];
+  const position = [...corners.flatMap(([x, z]) => [x, 0.18, z]), ...corners.flatMap(([x, z]) => [x, 0, z])];
+  const index = [0, 1, 2, 0, 2, 3, /* underside */ 4, 6, 5, 4, 7, 6];
+  const out = NYC.subdivideTriangles({ attrs: { position: { array: position, itemSize: 3 } }, index, world: position }, 40);
+  const pos = out.attrs.position;
+  // The height a face is drawn at over (x, z): its triangle there, each corner lifted by the ground under it
+  const drawnAt = (y, x, z) => {
+    for (let t = 0; t < out.index.length; t += 3) {
+      const [a, b, c] = [out.index[t], out.index[t + 1], out.index[t + 2]].map((i) => [pos[3 * i], pos[3 * i + 1], pos[3 * i + 2]]);
+      if ([a, b, c].some((p) => Math.abs(p[1] - y) > 1e-6)) continue; // float32 heights
+      const det = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2]);
+      const l1 = ((b[2] - c[2]) * (x - c[0]) + (c[0] - b[0]) * (z - c[2])) / det;
+      const l2 = ((c[2] - a[2]) * (x - c[0]) + (a[0] - c[0]) * (z - c[2])) / det;
+      const l3 = 1 - l1 - l2;
+      if (Math.min(l1, l2, l3) < -1e-9) continue;
+      return [a, b, c].reduce((sum, p, k) => sum + [l1, l2, l3][k] * (p[1] + app.offsetAt(p[0], p[2])), 0);
+    }
+    return NaN;
+  };
+  for (let z = -1450; z > -5400; z -= 50) {
+    const top = drawnAt(0.18, -526, z);
+    const under = drawnAt(0, -526, z);
+    assert.ok(under < top - 0.1, `at z ${z} the underside is drawn at ${under.toFixed(2)}, the top at ${top.toFixed(2)}`);
+    assert.ok(Math.abs(top - 0.18 - app.offsetAt(-526, z)) < 0.05, `top at z ${z}`);
+  }
+  // and the shadow stand-ins leave the ground layers to cast their own (a stand-in is a copy of the flat geometry)
+  assert.match(read('js/scene-culling.js'), /if \(o\.userData\.flatGeometry\) return;/);
+});
