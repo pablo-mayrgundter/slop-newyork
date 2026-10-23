@@ -93,6 +93,13 @@ code.
   Anything new that uses storage buffers, compute or `attributeArray`
   random access needs a WebGL2 path or a guard on
   `renderer.backend.isWebGPUBackend`.
+- **Shade by height above the street with `NYC.deckPosition()`**, not
+  `positionWorld`. In the guest every vertex is lifted onto the host's
+  terrain (js/guest.js, THE GROUND), so `positionWorld.y` there is the
+  lifted height. Patterns keyed to height above the deck (storeys,
+  waterlines, lens colours, crevices) read `deckPosition()`, which takes
+  the lift back off; in the app it is `positionWorld` itself. View
+  vectors and distances keep `positionWorld`.
 - **Headless checks in cloud sessions:**
   - Use Chromium on SwiftShader:
     `--use-angle=swiftshader --enable-unsafe-swiftshader`. Chromium is
