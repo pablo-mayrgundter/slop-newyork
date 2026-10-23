@@ -82,8 +82,11 @@ function makeGeoFrame() {
 const GROUND_BOUNDS = { x0: -2700, x1: 2900, z0: -7400, z1: 6800 };
 
 // options.curve (default true): the globe's drop. The app, on a plane of its own (its sky, fog and 60 km harbour are
-// flat), leaves it out
-function makeGround(frame, bounds = GROUND_BOUNDS, { curve: curved = true } = {}) {
+// flat), leaves it out. options.linear (default false): the ground between the grid's points is linear over each cell's
+// two triangles (split along the diagonal from its (i + 1, j) corner to its (i, j + 1) one) rather than bilinear, so a
+// layer cut along the grid's lines and diagonals (conformTriangles) follows it exactly; options.quantize, a function
+// each offset is passed through (the app's: an offset under a millimetre is none, so the ground there is quiet)
+function makeGround(frame, bounds = GROUND_BOUNDS, { curve: curved = true, linear = false, quantize = null } = {}) {
   // The Earth's mean radius of curvature at LAT0 on WGS84 (√(MN)): its d² / 2R is within 0.4% (~2 cm at 7 km) of the
   // drop along either principal direction
   const A = 6378137.0;
@@ -107,6 +110,10 @@ function makeGround(frame, bounds = GROUND_BOUNDS, { curve: curved = true } = {}
     const tx = fx - i;
     const tz = fz - j;
     const at = (c, r) => values[r * g.cols + c];
+    if (linear) {
+      if (tx + tz <= 1) return at(i, j) + (at(i + 1, j) - at(i, j)) * tx + (at(i, j + 1) - at(i, j)) * tz;
+      return at(i + 1, j + 1) + (at(i, j + 1) - at(i + 1, j + 1)) * (1 - tx) + (at(i + 1, j) - at(i + 1, j + 1)) * (1 - tz);
+    }
     const a = at(i, j) + (at(i + 1, j) - at(i, j)) * tx;
     const b = at(i, j + 1) + (at(i + 1, j + 1) - at(i, j + 1)) * tx;
     return a + (b - a) * tz;
@@ -117,6 +124,7 @@ function makeGround(frame, bounds = GROUND_BOUNDS, { curve: curved = true } = {}
     bounds,
     curvature,
     tangent,
+    linear,
     get grid() { return grid; },
     get offsets() { return offsets; },
     get height0() { return height0; },
@@ -140,7 +148,7 @@ function makeGround(frame, bounds = GROUND_BOUNDS, { curve: curved = true } = {}
         }
       }
       pending = g;
-      return { lonLat, cols, rows };
+      return { lonLat, cols, rows, grid: g };
     },
 
     // Heights (m above the host's ellipsoid) at samples()' points, in its order. A height that isn't a finite number
@@ -160,7 +168,7 @@ function makeGround(frame, bounds = GROUND_BOUNDS, { curve: curved = true } = {}
       fillHoles(h, g.cols, g.rows);
       grid = g;
       height0 = Number.isFinite(base) ? base : bilinear(g, h, tangent.x, tangent.z);
-      offsets = Float32Array.from(h, (v) => v - height0);
+      offsets = Float32Array.from(h, quantize ? (v) => quantize(v - height0) : (v) => v - height0);
       let min = Infinity;
       let max = -Infinity;
       for (const v of offsets) {
@@ -425,6 +433,197 @@ function subdivideTriangles(mesh, needsSplit, band = DRAPE_BAND, maxTriangles = 
   return { attrs, index, vertices, triangles: index.length / 3, capped };
 }
 
+// A linear ground (makeGround's linear: real terrain, ?ground=terrain) is draped exactly instead: each triangle is cut
+// along the grid's lines (x = x0 + i dx, z = z0 + j dz) and its cells' diagonals (i + j = k in cells), the lines across
+// which the ground bends, so each piece lies in one of the ground's triangles, where the lift is linear: the drawn layer
+// is the ground, at its own height over it, wherever it is, and two layers a centimetre apart (the paint on the deck)
+// stay a centimetre apart. Real terrain bends a little everywhere, so a drape by tolerance (above) splits a layer down to
+// its least edge all over the island, and even then leaves it centimetres off the ground, where the paint drowns in the
+// deck; cut to the grid it is exact, and costs what its edges' crossings with the grid's lines cost. A triangle whose
+// cells hold no lift at all (quiet: the ground off Manhattan, which the app's grounds leave flat) is kept whole.
+// mesh: as subdivideTriangles'; grid: { x0, z0, dx, dz, cols, rows }; quiet(u0, u1, w0, w1): whether the ground is 0 over
+// the cells u0..u1, w0..w1 (fractional, unclamped). Each triangle is cut, family by family (x, z, then the diagonals),
+// by Sutherland-Hodgman, and each convex piece fanned; a cut point is made once per edge and line, and from the edge's
+// lesser end (by x, z, y), so the two triangles on an edge cut it alike and the mesh stays watertight. dropUnder (a
+// world y, or null): the faces looking down with every corner at or under it are left out, the undersides of the slabs
+// lying on the deck (the sidewalks, the yards, the lawns, the island's own base), which nothing sees: cut to the grid
+// they cost as much as the tops (a quarter of the drape), and left whole they would stand over the ground where it is
+// concave (the roof at a driver's eye, THE GROUND). Returns null when nothing was changed, else as subdivideTriangles
+const CONFORM_EPS = 1e-7; // in cells: a corner this near a line is on it
+const CONFORM_UNDER = 0.35; // dropUnder in drapeGroundLayers: the slabs' undersides (world y, m)
+function conformTriangles(mesh, grid, band = DRAPE_BAND, quiet = null, dropUnder = null) {
+  const count = mesh.world.length / 3;
+  const tris = mesh.index || Uint32Array.from({ length: count }, (_, i) => i);
+  const names = Object.keys(mesh.attrs);
+  const sizes = names.map((n) => mesh.attrs[n].itemSize);
+  const own = names.map((n) => mesh.attrs[n].array);
+  const added = names.map(() => []);
+  const ownW = mesh.world;
+  const addedW = [];
+  const X = (p) => (p < count ? ownW[3 * p] : addedW[3 * (p - count)]);
+  const Y = (p) => (p < count ? ownW[3 * p + 1] : addedW[3 * (p - count) + 1]);
+  const Z = (p) => (p < count ? ownW[3 * p + 2] : addedW[3 * (p - count) + 2]);
+  const { x0, z0, dx, dz, cols, rows } = grid;
+  const U = (p) => (X(p) - x0) / dx;
+  const W = (p) => (Z(p) - z0) / dz;
+  const families = [U, W, (p) => U(p) + W(p)];
+  const limits = [[0, cols - 1], [0, rows - 1], [1, cols + rows - 3]];
+  const lesser = (p, q) => {
+    const xp = X(p);
+    const xq = X(q);
+    if (xp !== xq) return xp < xq;
+    const zp = Z(p);
+    const zq = Z(q);
+    if (zp !== zq) return zp < zq;
+    const yp = Y(p);
+    const yq = Y(q);
+    return yp !== yq ? yp < yq : p < q;
+  };
+  const cuts = new Map(); // edge (its two vertices) → [line, vertex, line, vertex, ...]
+  const cut = (p, q, f, k) => {
+    if (!lesser(p, q)) [p, q] = [q, p];
+    const key = p * 67108864 + q; // vertices under 2^26
+    const line = f * 1e6 + k;
+    let list = cuts.get(key);
+    if (list) {
+      for (let i = 0; i < list.length; i += 2) if (list[i] === line) return list[i + 1];
+    } else cuts.set(key, (list = []));
+    const fp = families[f](p);
+    const t = (k - fp) / (families[f](q) - fp);
+    const v = count + addedW.length / 3;
+    for (let n = 0; n < names.length; n++) {
+      const s = sizes[n];
+      const d = added[n];
+      const at = (r, j) => (r < count ? own[n][r * s + j] : d[(r - count) * s + j]);
+      const o = d.length;
+      for (let j = 0; j < s; j++) d.push(at(p, j) + (at(q, j) - at(p, j)) * t);
+      if (names[n] === 'normal' && s === 3) {
+        const l = Math.hypot(d[o], d[o + 1], d[o + 2]) || 1;
+        for (let j = 0; j < 3; j++) d[o + j] /= l;
+      }
+    }
+    addedW.push(X(p) + (X(q) - X(p)) * t, Y(p) + (Y(q) - Y(p)) * t, Z(p) + (Z(q) - Z(p)) * t);
+    list.push(line, v);
+    return v;
+  };
+  // The polygon's parts on either side of line k of family f (corners on it in both)
+  const split = (poly, f, k) => {
+    const below = [];
+    const above = [];
+    const fam = families[f];
+    const n = poly.length;
+    const ds = poly.map((p) => {
+      const d = fam(p) - k;
+      return Math.abs(d) < CONFORM_EPS ? 0 : d;
+    });
+    for (let a = 0; a < n; a++) {
+      const p = poly[a];
+      const dp = ds[a];
+      const dq = ds[(a + 1) % n];
+      if (dp <= 0) below.push(p);
+      if (dp >= 0) above.push(p);
+      if ((dp < 0 && dq > 0) || (dp > 0 && dq < 0)) {
+        const v = cut(p, poly[(a + 1) % n], f, k);
+        below.push(v);
+        above.push(v);
+      }
+    }
+    return [below, above];
+  };
+  const kept = [];
+  const out = [];
+  let changed = false;
+  for (let t = 0; t < tris.length; t += 3) {
+    const a = tris[t];
+    const b = tris[t + 1];
+    const c = tris[t + 2];
+    const ys = [Y(a), Y(b), Y(c)];
+    if (Math.min(...ys) < band[0] || Math.max(...ys) > band[1]) {
+      kept.push(a, b, c);
+      continue;
+    }
+    if (dropUnder !== null && Math.max(...ys) <= dropUnder) {
+      const ny = (Z(b) - Z(a)) * (X(c) - X(a)) - (X(b) - X(a)) * (Z(c) - Z(a));
+      if (ny < -1e-9) {
+        changed = true;
+        continue;
+      }
+    }
+    const us = [U(a), U(b), U(c)];
+    const ws = [W(a), W(b), W(c)];
+    if (quiet && quiet(Math.min(...us), Math.max(...us), Math.min(...ws), Math.max(...ws))) {
+      out.push(a, b, c);
+      continue;
+    }
+    let polys = [[a, b, c]];
+    for (let f = 0; f < 3; f++) {
+      const next = [];
+      for (let poly of polys) {
+        let lo = Infinity;
+        let hi = -Infinity;
+        for (const p of poly) {
+          const v = families[f](p);
+          if (v < lo) lo = v;
+          if (v > hi) hi = v;
+        }
+        const k0 = Math.max(Math.ceil(lo + CONFORM_EPS), limits[f][0]);
+        const k1 = Math.min(Math.floor(hi - CONFORM_EPS), limits[f][1]);
+        for (let k = k0; k <= k1; k++) {
+          const [below, above] = split(poly, f, k);
+          if (below.length >= 3) next.push(below);
+          poly = above;
+        }
+        if (poly.length >= 3) next.push(poly);
+      }
+      polys = next;
+    }
+    if (polys.length === 1 && polys[0].length === 3) {
+      out.push(a, b, c);
+      continue;
+    }
+    changed = true;
+    for (const poly of polys) for (let i = 1; i + 1 < poly.length; i++) out.push(poly[0], poly[i], poly[i + 1]);
+  }
+  if (!changed) return null;
+  const vertices = count + addedW.length / 3;
+  const attrs = {};
+  names.forEach((name, k) => {
+    const arr = new Float32Array(vertices * sizes[k]);
+    arr.set(own[k]);
+    arr.set(added[k], own[k].length);
+    attrs[name] = arr;
+  });
+  const index = new Uint32Array(kept.length + out.length);
+  index.set(kept);
+  index.set(out, kept.length);
+  return { attrs, index, vertices, triangles: index.length / 3, capped: false };
+}
+
+// Whether the ground is 0 over a box of cells (conformTriangles' quiet): a summed-area table of the cells with a
+// corner off 0. Outside the grid the ground holds its edge, so a box is clamped to it
+function quietCells(ground) {
+  const { cols, rows } = ground.grid;
+  const o = ground.offsets;
+  const nc = cols - 1;
+  const nr = rows - 1;
+  const w = nc + 1;
+  const sat = new Int32Array(w * (nr + 1));
+  for (let j = 0; j < nr; j++) {
+    for (let i = 0; i < nc; i++) {
+      const bent = o[j * cols + i] !== 0 || o[j * cols + i + 1] !== 0 || o[(j + 1) * cols + i] !== 0 || o[(j + 1) * cols + i + 1] !== 0;
+      sat[(j + 1) * w + i + 1] = (bent ? 1 : 0) + sat[j * w + i + 1] + sat[(j + 1) * w + i] - sat[j * w + i];
+    }
+  }
+  const cl = (v, n) => Math.min(Math.max(Math.floor(v), 0), n - 1);
+  return (u0, u1, w0, w1) => {
+    const i0 = cl(u0, nc);
+    const i1 = cl(u1, nc);
+    const j0 = cl(w0, nr);
+    const j1 = cl(w1, nr);
+    return sat[(j1 + 1) * w + i1 + 1] - sat[j0 * w + i1 + 1] - sat[(j1 + 1) * w + i0] + sat[j0 * w + i0] === 0;
+  };
+}
+
 // The ground layers' meshes (above), each holding its flat geometry in userData.flatGeometry, the instanced slabs
 // among them baked into plain meshes: when the guest is built, before the culling set-up and the materials' pass
 // (roots: more groups whose flat layers follow the ground, as DRAPE_ROOTS')
@@ -499,8 +698,11 @@ function bakeInstances(o) {
 
 // Splits the ground layers for the ground set (above), each from its flat geometry, to the drape's detail (options:
 // DRAPE_DEFAULTS' fields). Returns the vertices and triangles of the layers before and after
+// A linear ground (makeGround's linear) is cut to its grid instead (conformTriangles), exactly, whatever the options
 function drapeGroundLayers(layers, ground, options = {}) {
   const { tolerance, minEdge, maxCells, maxTriangles } = { ...DRAPE_DEFAULTS, ...options };
+  const conform = ground.linear;
+  const quiet = conform ? quietCells(ground) : null;
   const cap = maxCells * Math.max(ground.grid.dx, ground.grid.dz);
   const off = (x, z) => ground.offsetAt(x, z);
   const needsSplit = (ax, az, bx, bz, cx, cz, longest) => {
@@ -527,7 +729,7 @@ function drapeGroundLayers(layers, ground, options = {}) {
     return world;
   });
   const areas = layers.map((o, k) => {
-    if (!Number.isFinite(maxTriangles)) return 0;
+    if (conform || !Number.isFinite(maxTriangles)) return 0;
     const flat = o.userData.flatGeometry;
     const w = worlds[k];
     const index = flat.index && flat.index.array;
@@ -549,7 +751,9 @@ function drapeGroundLayers(layers, ground, options = {}) {
     for (const [n, a] of Object.entries(flat.attributes)) attrs[n] = { array: a.array, itemSize: a.itemSize };
     const triangles = (flat.index ? flat.index.count : pos.count) / 3;
     const budget = Number.isFinite(maxTriangles) ? Math.max(triangles, Math.floor((maxTriangles * areas[k]) / totalArea)) : Infinity;
-    const out = subdivideTriangles({ attrs, index: flat.index && flat.index.array, world: worlds[k] }, needsSplit, DRAPE_BAND, budget);
+    const mesh = { attrs, index: flat.index && flat.index.array, world: worlds[k] };
+    const under = conform && o.material && o.material.side === THREE.FrontSide ? CONFORM_UNDER : null;
+    const out = conform ? conformTriangles(mesh, ground.grid, DRAPE_BAND, quiet, under) : subdivideTriangles(mesh, needsSplit, DRAPE_BAND, budget);
     stats.vertices[0] += pos.count;
     stats.triangles[0] += triangles;
     let geo = flat;
@@ -572,34 +776,118 @@ function drapeGroundLayers(layers, ground, options = {}) {
 // The ground's nodes, made once per page (TSL is only there in a browser) and shared by its guests: a vertex's lift is a
 // function of where it stands, the same for every guest of the same host. NYC.groundLift, the lift as a varying, is
 // what NYC.deckPosition (tsl-materials.js) takes off positionWorld to keep the shading's storeys on the road deck.
-let groundNodes = null;
-function getGroundNodes(tangent) {
-  if (groundNodes) return groundNodes;
-  const { Fn, texture, uniform, vec3, vec4, dot, positionLocal, modelWorldMatrix, modelWorldMatrixInverse } = window.NYC.TSL;
-  const map = texture(makeOffsetMap(new Float32Array(4), 2, 2));
+const groundNodes = {};
+// options.linear: the linear ground's nodes (makeGround's linear), which also leave out what lies at or under the
+// harbour's surface (SHORE_RAMP: a seawall's foot stays in the water as its top rises with the shore) and any object
+// with userData.groundFixed (geometry modelled at its real height, as the George Washington Bridge's approach: THE APP
+// ON THE GROUND), each object's weight set as it is drawn
+const SHORE_RAMP = [WATER_Y, -1.2]; // world y (flat): no lift at the first, all of it from the second up
+// The skirt (linear: objects with userData.groundSkirt, the buildings and what stands on the street, THE APP ON THE
+// GROUND): the vertices at the foot of an object's geometry (its least y, and under SKIRT_Y in the world) sink by
+// SKIRT_K times the ground's slope there, at most SKIRT_MAX, so a wall's foot, a chord between its corners' lifts,
+// reaches into the ground where it bends rather than standing over it
+const SKIRT_Y = 0.6;
+const SKIRT_K = 40;
+const SKIRT_MAX = 12;
+function getGroundNodes(tangent, { linear = false } = {}) {
+  const variant = linear ? 'linear' : 'bilinear';
+  if (groundNodes[variant]) {
+    window.NYC.groundLift = groundNodes[variant].varyingLift;
+    return groundNodes[variant];
+  }
+  const { Fn, texture, uniform, vec2, vec3, vec4, ivec2, mat3, dot, floor, min, clamp, select, length, positionLocal, positionGeometry, normalLocal, modelWorldMatrix, modelWorldMatrixInverse } = window.NYC.TSL;
+  const map = texture(linear ? makeLinearMap(new Float32Array(4), 2, 2) : makeOffsetMap(new Float32Array(4), 2, 2));
   const box = uniform(new THREE.Vector4(0, 0, 1, 1)); // x0, z0, 1 / (cols dx), 1 / (rows dz)
   const texel = uniform(new THREE.Vector2(0.25, 0.25)); // half a texel: grid points sit on texel centres
   const on = uniform(0);
   const curvature = uniform(0);
   const centre = uniform(new THREE.Vector2(tangent.x, tangent.z));
-  // offsetAt() on the GPU: the map's offset at world (x, z), less the curve
-  const offset = Fn(([xz]) => {
-    const uv = xz.sub(box.xy).mul(box.zw).add(texel);
+  const cells = uniform(new THREE.Vector4(0, 0, 1, 1)); // linear: x0, z0, 1 / dx, 1 / dz
+  const size = uniform(new THREE.Vector2(2, 2)); // linear: cols, rows
+  const fixed = linear ? uniform(1).onObjectUpdate(({ object }) => (object.userData.groundFixed ? 0 : 1)) : null;
+  const skirt = linear ? uniform(0).onObjectUpdate(({ object }) => (object.userData.groundSkirt ? 1 : 0)) : null;
+  const foot = linear ? uniform(0).onObjectUpdate(({ object }) => {
+    const geo = object.userData.groundSkirt && object.geometry;
+    if (!geo) return 0;
+    if (!geo.boundingBox) geo.computeBoundingBox();
+    return geo.boundingBox.min.y;
+  }) : null;
+  // offsetAt() on the GPU at world (x, z), with the ground's gradient there: vec3(offset, ∂/∂x, ∂/∂z), less the curve
+  // (the gradient without it). Bilinear: the map's filtering, no gradient. Linear: the cell's four texels, the triangle
+  // of the cell (x, z) is in (makeGround's), the gradient bilinear between the points'; weighted by y (the vertex's flat
+  // height: SHORE_RAMP) and the object (groundFixed)
+  const ground = Fn(([xz, y]) => {
     const d = xz.sub(centre);
-    return map.sample(uv).level(0).r.mul(on).sub(dot(d, d).mul(curvature));
+    const drop = dot(d, d).mul(curvature);
+    if (!linear) {
+      const uv = xz.sub(box.xy).mul(box.zw).add(texel);
+      return vec3(map.sample(uv).level(0).r.mul(on).sub(drop), 0, 0);
+    }
+    const g = clamp(xz.sub(cells.xy).mul(cells.zw), vec2(0), size.sub(1)).toVar();
+    const c = min(floor(g), size.sub(2)).toVar();
+    const t = g.sub(c).toVar();
+    const i = ivec2(c).toVar();
+    const t00 = map.load(i).toVar();
+    const t10 = map.load(i.add(ivec2(1, 0))).toVar();
+    const t01 = map.load(i.add(ivec2(0, 1))).toVar();
+    const t11 = map.load(i.add(ivec2(1, 1))).toVar();
+    const [v00, v10, v01, v11] = [t00.r, t10.r, t01.r, t11.r];
+    const lower = v00.add(v10.sub(v00).mul(t.x)).add(v01.sub(v00).mul(t.y));
+    const upper = v11.add(v01.sub(v11).mul(t.x.oneMinus())).add(v10.sub(v11).mul(t.y.oneMinus()));
+    const slope = t00.gb.mix(t10.gb, t.x).mix(t01.gb.mix(t11.gb, t.x), t.y);
+    const shore = clamp(y.sub(SHORE_RAMP[0]).div(SHORE_RAMP[1] - SHORE_RAMP[0]), 0, 1);
+    const weight = on.mul(fixed).mul(shore);
+    return vec3(select(t.x.add(t.y).lessThanEqual(1), lower, upper).mul(weight).sub(drop), slope.mul(weight));
   });
   // A material's own position (or the vertex's, instanced), raised in world space and taken back to the object's.
-  // Sprites are placed by their positionNode (none: the object's origin) and billboarded after it
-  const lift = (material, node) => Fn(() => {
+  // Sprites are placed by their positionNode (none: the object's origin) and billboarded after it. On the linear ground
+  // a lit material's normal tilts with the ground as the lift shears it (n − g (u · n) in the object's frame, for the
+  // lift u·f(x, z): g the gradient taken there, u world up), so a slope is lit as one; walls (n · u = 0) stay as they are
+  const lift = (material, node) => Fn((builder) => {
     const p = node ?? (material.isSpriteNodeMaterial ? vec3(0) : positionLocal);
-    const xz = modelWorldMatrix.mul(vec4(p, 1.0)).xz;
-    return p.add(modelWorldMatrixInverse.mul(vec4(0.0, offset(xz), 0.0, 0.0)).xyz);
+    const w = modelWorldMatrix.mul(vec4(p, 1.0));
+    const l = ground(w.xz, w.y).toVar();
+    if (!linear) return p.add(modelWorldMatrixInverse.mul(vec4(0.0, l.x, 0.0, 0.0)).xyz);
+    if (material.lights && !material.isSpriteNodeMaterial && builder.geometry && builder.geometry.hasAttribute('normal')) {
+      const g = mat3(modelWorldMatrix).transpose().mul(vec3(l.y, 0.0, l.z));
+      const u = modelWorldMatrixInverse.mul(vec4(0.0, 1.0, 0.0, 0.0)).xyz;
+      normalLocal.assign(normalLocal.sub(g.mul(dot(u, normalLocal))));
+    }
+    const atFoot = positionGeometry.y.lessThanEqual(foot.add(1e-3)).and(w.y.lessThanEqual(SKIRT_Y));
+    const sink = select(atFoot, min(length(l.yz).mul(SKIRT_K), SKIRT_MAX).mul(skirt), 0.0);
+    return p.add(modelWorldMatrixInverse.mul(vec4(0.0, l.x.sub(sink), 0.0, 0.0)).xyz);
   })();
   // The lift at the vertex as it is drawn (the lift moves it straight up, so its x, z are those it was lifted at)
-  const varyingLift = offset(modelWorldMatrix.mul(vec4(positionLocal, 1.0)).xz).toVarying('vGroundLift');
-  groundNodes = { map, box, texel, on, curvature, lift };
+  const at = modelWorldMatrix.mul(vec4(positionLocal, 1.0));
+  const varyingLift = ground(at.xz, at.y).x.toVarying('vGroundLift');
+  groundNodes[variant] = { map, box, texel, on, curvature, cells, size, lift, linear, varyingLift };
   window.NYC.groundLift = varyingLift;
-  return groundNodes;
+  return groundNodes[variant];
+}
+
+// The linear ground's map (getGroundNodes' linear, read texel by texel): each grid point's offset, and the ground's
+// gradient there (east, south: central differences, one-sided at the edges), from which the shading's normals tilt,
+// in a float RGBA map (r, g, b: the offset, ∂/∂x, ∂/∂z)
+function makeLinearMap(values, cols, rows, dx = 1, dz = 1) {
+  const data = new Float32Array(values.length * 4);
+  const at = (c, r) => values[Math.min(Math.max(r, 0), rows - 1) * cols + Math.min(Math.max(c, 0), cols - 1)];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const i = r * cols + c;
+      const c0 = Math.max(c - 1, 0);
+      const c1 = Math.min(c + 1, cols - 1);
+      const r0 = Math.max(r - 1, 0);
+      const r1 = Math.min(r + 1, rows - 1);
+      data[4 * i] = values[i];
+      data[4 * i + 1] = c1 > c0 ? (at(c1, r) - at(c0, r)) / ((c1 - c0) * dx) : 0;
+      data[4 * i + 2] = r1 > r0 ? (at(c, r1) - at(c, r0)) / ((r1 - r0) * dz) : 0;
+    }
+  }
+  const map = new THREE.DataTexture(data, cols, rows, THREE.RGBAFormat, THREE.FloatType);
+  map.magFilter = THREE.NearestFilter;
+  map.minFilter = THREE.NearestFilter;
+  map.needsUpdate = true;
+  return map;
 }
 
 // The ground's offsets as a linearly filtered half-float map (core in WebGL2, where float32 filtering is an extension)
@@ -674,11 +962,14 @@ function prepareMaterials(scene, { lift = null, output = null, setupDepth = null
 //                         (drapeGroundLayers) and padding the bounding spheres by what it moves
 // =====================================================================================================================
 // options: drape (the layers' detail, DRAPE_DEFAULTS' fields), bounds (the ground's grid, default GROUND_BOUNDS),
-// curve (the globe's drop, default true), roots (more groups whose flat layers follow the ground)
-function createGroundDrape({ drape = null, bounds = GROUND_BOUNDS, curve = true, roots = [] } = {}) {
+// curve (the globe's drop, default true), roots (more groups whose flat layers follow the ground), linear (the ground
+// linear over its cells' triangles, and the layers cut to them: makeGround's linear, conformTriangles; default false),
+// quiet (linear: an offset under this is 0)
+function createGroundDrape({ drape = null, bounds = GROUND_BOUNDS, curve = true, roots = [], linear = false, quiet = 0 } = {}) {
   const frame = makeGeoFrame();
-  const ground = makeGround(frame, bounds, { curve });
-  const nodes = getGroundNodes(ground.tangent);
+  const quantize = linear ? (v) => (Math.abs(v) < quiet ? 0 : v) : null;
+  const ground = makeGround(frame, bounds, { curve, linear, quantize });
+  const nodes = getGroundNodes(ground.tangent, { linear });
   let scene = null;
   let layers = [];
   let lights = [];
@@ -698,7 +989,9 @@ function createGroundDrape({ drape = null, bounds = GROUND_BOUNDS, curve = true,
   function takeLights(s) {
     lights = [];
     s.traverse((o) => {
-      if (o.isPointLight || o.isSpotLight) lights.push(o);
+      if (!(o.isPointLight || o.isSpotLight)) return;
+      for (let p = o; p; p = p.parent) if (p.userData.groundFixed) return;
+      lights.push(o);
     });
     return lights;
   }
@@ -707,10 +1000,12 @@ function createGroundDrape({ drape = null, bounds = GROUND_BOUNDS, curve = true,
     ground.set(heights, options);
     const { x0, z0, dx, dz, cols, rows } = ground.grid;
     const old = nodes.map.value;
-    nodes.map.value = makeOffsetMap(ground.offsets, cols, rows);
+    nodes.map.value = linear ? makeLinearMap(ground.offsets, cols, rows, dx, dz) : makeOffsetMap(ground.offsets, cols, rows);
     old.dispose();
     nodes.box.value.set(x0, z0, 1 / (cols * dx), 1 / (rows * dz));
     nodes.texel.value.set(0.5 / cols, 0.5 / rows);
+    nodes.cells.value.set(x0, z0, 1 / dx, 1 / dz);
+    nodes.size.value.set(cols, rows);
     nodes.on.value = 1;
     nodes.curvature.value = ground.curvature;
     frame.height0 = ground.height0;
@@ -795,17 +1090,19 @@ function liftObject(o, ground) {
 // =====================================================================================================================
 // THE DEMO GROUND
 // A ground as a host would hand it over, standing in for its terrain (guest.html?ground=demo, index.html?ground=demo):
-// a smooth 40 m hill over Midtown (centred at world x -300, z -900, 1.1 km across its σ) on flat land 5 m above the sea,
-// in heights above the ellipsoid (sea level 32.7 m under it, as at Manhattan). Its steepest grade is 2.2%, 1.1 km out
+// a smooth hill over Midtown (centred at world x -300, z -900), 40 m high and 1.1 km across its σ unless the app's
+// ?hill= and ?spread= say otherwise, on flat land 5 m above the sea, in heights above the ellipsoid (sea level 32.7 m
+// under it, as at Manhattan). Its steepest grade, a σ out, is height / σ · e^-1/2: 2.2% by default, 15% at ?hill=150
+// &spread=600
 // =====================================================================================================================
 const DEMO_SEA_LEVEL = -32.7;
 const DEMO_LAND = 5;
 const DEMO_HILL = { x: -300, z: -900, height: 40, sigma: 1100 };
 
-// The demo's heights at groundSamples()' lon / lat pairs
-function demoGroundHeights(lonLat, frame, seaLevel = DEMO_SEA_LEVEL) {
+// The demo's heights at groundSamples()' lon / lat pairs (hill: DEMO_HILL's fields, any of them, ?hill= and ?spread=)
+function demoGroundHeights(lonLat, frame, seaLevel = DEMO_SEA_LEVEL, hill = DEMO_HILL) {
   const heights = new Float64Array(lonLat.length / 2);
-  const { x, z, height, sigma } = DEMO_HILL;
+  const { x, z, height, sigma } = { ...DEMO_HILL, ...hill };
   for (let i = 0; i < heights.length; i++) {
     const p = frame.lonLatToWorld(lonLat[2 * i], lonLat[2 * i + 1]);
     const d2 = (p.x - x) ** 2 + (p.z - z) ** 2;
@@ -816,55 +1113,178 @@ function demoGroundHeights(lonLat, frame, seaLevel = DEMO_SEA_LEVEL) {
 
 // =====================================================================================================================
 // THE APP ON THE GROUND
-// index.html?ground=demo: the app as it is (its backend, post-processing, HUD, controllers and cameras) over the demo
-// ground. js/main.js calls createAppGround() before it builds the city, takeLayers() before the culling set-up,
-// attach() before the shaders compile, and beforeRender() each frame between the simulation and the render; without
-// ?ground the app never calls the rest (createAppGround returns null) and draws as before.
-//   - The ground is the demo's, with two differences from a host's: the flat land lifts nothing (set()'s height0), so
-//     the shore and the harbour's water stay where they are and the hill rises 40 m over Midtown (5th Ave & 42nd St
-//     27.6 m up); and there's no globe's curve, since the app's world is a plane (its sky, fog and 60 km water plane of
-//     two triangles, whose corners the curve would sink 70 m under the shore). Its grid reaches 7 km or more from
-//     the hill's top, where the hill has gone (e^-21), so everything off it, the water's corners and New Jersey, holds
-//     a ground of 0.
-//   - Only Manhattan's ground layers are split (DRAPE_ROOTS). The hill's foot reaches Queens (1.5 m at Long Island
-//     City), whose flat layers ride the vertex lift alone; split too ('Boroughs' in createGroundDrape's roots) they
-//     took the drape from 4 s to 26 s headless and from 0.8 M to 6.4 M more triangles: the drape splits every edge
-//     over 4 ground cells, and the boroughs' ground is kilometres-long triangles.
+// index.html?ground=demo (the demo hill, ?hill=<m> its height and ?spread=<m> its σ) or ?ground=terrain (Manhattan's
+// real ground: AWS's Terrarium elevation tiles, js/terrarium.mjs): the app as it is (its backend, post-processing, HUD,
+// controllers and cameras) over that ground. js/main.js calls createAppGround() before it builds the city, takeLayers()
+// before the culling set-up, attach() (awaited) before the shaders compile, and beforeRender() each frame between the
+// simulation and the render; without ?ground the app never calls the rest (createAppGround returns null) and draws as
+// before. The two grounds take one path (appGroundOf, appDrape): only their heights differ.
+//   - The terrain's 13 tiles (zoom 13, 1.1 MB) are asked for as createAppGround() runs, before the city is built, and
+//     sampled on a 40 m grid over the island (TERRAIN_BOUNDS, 146 × 539 points). Under the sea is the sea (the rivers'
+//     beds and the harbour's bathymetry clamp to 0), and the deck stands its freeboard over it (set()'s seaLevel 0 and
+//     height0 2.2: land under 2.2 m lifts nothing). Offline, or a tile failing twice, leaves the city flat, with a
+//     console warning; the lift is in the materials, switched off.
+//   - The ground is Manhattan's only (manhattanMask: nyc-geodata.js manhattan and upperManhattan), 0 elsewhere, for
+//     both grounds. The other boroughs and New Jersey carry relief of their own, modelled (the Palisades and Jersey
+//     City Heights, js/boroughs.js; Governors Island's hills): real heights, or the demo hill's tail, under them would
+//     stack on it, the Palisades doubled (150 m over a 2.5 km σ lifted them 29-66 m). Off the island the ground is 0
+//     and their layers whole (quiet). Between, the rivers: real heights fall to the shore by themselves, and the shore's
+//     cliffs (Inwood, Fort Tryon) and the demo hill's flanks meet the water in a seawall whose foot stays in it
+//     (SHORE_RAMP: no lift at the harbour's surface, all of it 1 m up).
+//   - The George Washington Bridge is left where it is (groundFixed: no lift, no shadow stand-in, no lamps lifted): the
+//     flat city ramps its approach from the street up to its 65 m deck over Washington Heights, the height the real
+//     bluff stands at, so lifted it would stand 50 m over its own anchorage. Unlifted, its approach runs into the bluff,
+//     as the real one runs in a cut.
+//   - The ground is linear over its cells' triangles (makeGround's linear), and the ground layers, Manhattan's
+//     (DRAPE_ROOTS) and upper Manhattan's (BoroughLand and its bulkheads, APP_ROOTS), are cut to them (conformTriangles):
+//     exact, so the paint 12 mm over the deck stays 12 mm over it on any slope. On the terrain the tolerance drape the
+//     guest takes from afar (10 cm, 8 m, 1.5 M triangles) left the deck over the ground by more than the paint's 12 mm
+//     at 43% of the island and up to 29 m off where its budget ran out, in 24 s; cut to the 40 m grid it is exact, in
+//     8-10 s and 2.0 M more triangles (3.0 M), the slabs' undersides left out (conformTriangles dropUnder). The demo
+//     hill costs 1.7 M more (2.6 M; the tolerance drape took 2.1 M), 150 m over a 600 m σ 1.0 M.
 //   - The materials keep their MRT outputs (prepareMaterials keepMRT): the scene pass's MRT (SSR, bloom) joins them.
 //   - The cameras are placed in the simulation's flat frame (cameras.js) and lifted for the render only: a follow
 //     camera (chase, action, POV, the helicopter's) by the ground under its entity, so the framing holds on a slope, or
-//     by the ground under itself where that is higher (looking down a hill); a scenic one by the ground under it, and
-//     its look-at point by the ground under that. The next frame's camera update places it flat again.
+//     by the ground under itself where that is higher (looking down a hill, or backing up to a cliff); a scenic one by
+//     the ground under it, and its look-at point by the ground under that. The next frame's camera update places it
+//     flat again.
 //   - The vehicles, the player, trees and street furniture ride the vertex lift, each vertex by the ground under it:
-//     a car's wheels stay on the slope and its body shears with it, which at the demo's 2.2% reads as its pitch. A
-//     rigid tilt on top would double it, so there's none.
+//     a car's wheels stay on the slope and its body shears with it, which on a street's grade reads as its pitch. A
+//     rigid tilt on top would double it, so there's none. A lit material's normal tilts as the lift shears its surface
+//     (getGroundNodes' lift: from the map's gradients, bilinear, so a slope is lit as one, walls as they were).
+//   - A building's foot is a chord between its corners' lifts, which stands over the ground where it bends: on the
+//     terrain's 40 m grid a 40 m wall stood over it by more than 10 cm at 15% of places, up to 6 m by the cliffs. So
+//     what stands on the street (skirtObjects: the buildings, landmarks, street furniture and the boroughs' meshes)
+//     sinks the vertices at its geometry's foot by 40 times the slope there, at most 12 m (SKIRT_K, SKIRT_MAX): 0.14%
+//     of 40 m walls then stand over it by 10 cm, 2.5% of 100 m ones. The storeys stay on the deck (deckPosition
+//     takes off the lift, not the sink), the wall just reaching further down.
 //   - The fog keeps positionWorld's (true) height: haze thins with altitude, and the camera and the fragment are both
 //     lifted, so the haze between them is the air's, hill or not (deckPosition there would put Midtown's facades in
 //     the denser air of the street, up to 4% (40 m / the haze's 900 m) more haze over the hill).
 // =====================================================================================================================
 const APP_GROUND_BOUNDS = { x0: -7500, x1: 7000, z0: -8500, z1: 7500 };
+const DEMO_LIMITS = { height: [0, 400], sigma: [100, 3000] };
 
-function createAppGround(mode) {
-  if (mode !== 'demo') return null;
-  const drape = createGroundDrape({ bounds: APP_GROUND_BOUNDS, curve: false });
-  const stats = { materials: 0, lights: 0, samplesMs: 0, setGroundMs: 0, drape: null };
+// The app's ground options from the page's query (a URLSearchParams, or just ?ground's value): ?ground=demo|terrain,
+// and the demo hill's ?hill=<m> (height) and ?spread=<m> (σ), clamped to DEMO_LIMITS. null without a ground
+function parseGroundOptions(query) {
+  const get = (k) => (query && typeof query.get === 'function' ? query.get(k) : k === 'ground' ? query : null);
+  const mode = get('ground');
+  if (mode !== 'demo' && mode !== 'terrain') return null;
+  const num = (k, [lo, hi], fallback) => {
+    const raw = get(k);
+    const v = raw === null || raw === '' ? NaN : Number(raw);
+    return Number.isFinite(v) ? Math.min(Math.max(v, lo), hi) : fallback;
+  };
+  const options = { mode };
+  if (mode === 'demo') {
+    options.hill = { height: num('hill', DEMO_LIMITS.height, DEMO_HILL.height), sigma: num('spread', DEMO_LIMITS.sigma, DEMO_HILL.sigma) };
+  }
+  return options;
+}
+
+// The demo's grid: APP_GROUND_BOUNDS, or wider for a wide hill, so the hill is gone (e^-21, as the default's 7 km) at
+// its edge; and its spacing: 40 m, finer for a narrow hill (a tenth of σ, down to 10 m)
+function demoGroundGrid(hill) {
+  const reach = 6.5 * hill.sigma;
+  const b = APP_GROUND_BOUNDS;
+  const bounds = {
+    x0: Math.min(b.x0, DEMO_HILL.x - reach), x1: Math.max(b.x1, DEMO_HILL.x + reach),
+    z0: Math.min(b.z0, DEMO_HILL.z - reach), z1: Math.max(b.z1, DEMO_HILL.z + reach)
+  };
+  return { bounds, spacing: Math.min(40, Math.max(10, hill.sigma / 10)) };
+}
+
+// ?ground=terrain: the real ground under Manhattan (js/terrarium.mjs), on a grid over the island and its piers out to the
+// rivers (its edge in the water, where the ground is 0)
+const TERRAIN_BOUNDS = { x0: -3000, x1: 2800, z0: -14700, z1: 6800 };
+const TERRAIN_SPACING = 40;
+// What either ground leaves where it is (groundFixed): the George Washington Bridge, whose approach the flat city ramps
+// from the street up to its deck over Washington Heights (65 m over the Hudson), the height the real bluff stands at
+const APP_FIXED = ['George Washington Bridge'];
+// The layers that follow the ground besides Manhattan's own (DRAPE_ROOTS): Harlem north of 129th St, Washington Heights
+// and Inwood are BoroughLand (with the other boroughs, whose ground, 0, leaves it whole: conformTriangles' quiet) and its
+// bulkheads
+const APP_ROOTS = ['BoroughLand', 'BoroughBulkheads'];
+// An offset under this (m) is none: the demo hill's tail, and the terrain's last millimetres over the freeboard, leave the
+// ground quiet (conformTriangles) where nothing would show
+const APP_QUIET = 1e-3;
+
+// Per grid point (samples()' grid, row by row), whether it is on Manhattan: the detailed island and the upper one
+// (nyc-geodata.js manhattan, upperManhattan, which meet at the cut), by each row's crossings with their shores
+function manhattanMask(grid, polygons = [window.NYC.GEO.manhattan, window.NYC.GEO.upperManhattan]) {
+  const { x0, z0, dx, dz, cols, rows } = grid;
+  const keep = new Uint8Array(cols * rows);
+  const xs = [];
+  for (let r = 0; r < rows; r++) {
+    const z = z0 + r * dz;
+    for (const ring of polygons) {
+      xs.length = 0;
+      const n = ring.length / 2;
+      for (let a = 0, b = n - 1; a < n; b = a++) {
+        const za = ring[2 * a + 1];
+        const zb = ring[2 * b + 1];
+        if ((za > z) !== (zb > z)) xs.push(ring[2 * a] + ((z - za) / (zb - za)) * (ring[2 * b] - ring[2 * a]));
+      }
+      xs.sort((p, q) => p - q);
+      for (let k = 0; k + 1 < xs.length; k += 2) {
+        const c0 = Math.max(0, Math.ceil((xs[k] - x0) / dx));
+        const c1 = Math.min(cols - 1, Math.floor((xs[k + 1] - x0) / dx));
+        for (let c = c0; c <= c1; c++) keep[r * cols + c] = 1;
+      }
+    }
+  }
+  return keep;
+}
+
+// The URL of a module next to this script (terrarium.mjs), read when ground.js is loaded: a classic script's import()
+// resolves from the page otherwise
+const GROUND_SCRIPT = typeof document !== 'undefined' && document.currentScript ? document.currentScript.src : null;
+
+// The app's ground (main.js): null without ?ground=demo or ?ground=terrain (query: the page's URLSearchParams, or just
+// ?ground's value), and the city drawn as before
+function createAppGround(query) {
+  const options = parseGroundOptions(query);
+  if (!options) return null;
+  return options.mode === 'terrain' ? createTerrainGround() : createDemoGround(options.hill);
+}
+
+// What both grounds do with the app (main.js): the layers, the materials, the lamps, then the heights (heights(): a
+// promise for set()'s heights and options, or null for a flat ground), and the lamps and the camera each frame
+function appGroundOf(drape, heights, stats, extra = {}) {
+  // What is left where it is (groundFixed), by name: before the culling set-up (its shadow stand-ins), and again after
+  // it (its chunks are meshes of their own, named as their sources)
+  const markFixed = (scene) => {
+    if (extra.fixed) {
+      scene.traverse((o) => {
+        if (extra.fixed.includes(o.name)) o.userData.groundFixed = true;
+      });
+    }
+  };
   return {
     drape,
     frame: drape.frame,
     stats,
     offsetAt: drape.offsetAt,
-    takeLayers: (scene) => drape.takeLayers(scene),
-    attach(scene, mark = () => {}) {
+    takeLayers(scene) {
+      markFixed(scene);
+      return drape.takeLayers(scene);
+    },
+    async attach(scene, mark = () => {}) {
       const t = performance.now();
+      markFixed(scene);
+      stats.skirted = skirtObjects(scene);
       stats.materials = prepareMaterials(scene, { lift: drape.liftMaterial, keepMRT: true });
       stats.lights = drape.takeLights(scene).length;
       stats.materialsMs = Math.round(performance.now() - t);
       const t0 = performance.now();
-      const { lonLat } = drape.ground.samples(40);
-      const heights = demoGroundHeights(lonLat, drape.frame);
+      const ground = await heights();
       stats.samplesMs = Math.round(performance.now() - t0);
-      stats.drape = drape.set(heights, { seaLevel: DEMO_SEA_LEVEL, height0: DEMO_SEA_LEVEL + DEMO_LAND });
-      stats.setGroundMs = Math.round(performance.now() - t0);
+      if (ground) {
+        const t1 = performance.now();
+        stats.drape = drape.set(ground.heights, ground.options);
+        stats.setGroundMs = Math.round(performance.now() - t1);
+      }
       mark('ground');
     },
     beforeRender(cameraSystem) {
@@ -872,6 +1292,70 @@ function createAppGround(mode) {
       liftAppCamera(cameraSystem, drape.ground);
     }
   };
+}
+
+// Both grounds' drape: linear, its layers cut to the grid (conformTriangles), the bridge left in place
+function appDrape(bounds) {
+  return createGroundDrape({ bounds, curve: false, linear: true, roots: APP_ROOTS, quiet: APP_QUIET });
+}
+
+// What stands on the street and sinks its foot into the ground where it bends (getGroundNodes' skirt): the meshes of
+// the buildings, the landmarks, the street furniture and the boroughs, after the culling set-up (whose chunks are
+// meshes of their own), but not the ground layers, what is fixed, or anything skinned. Returns how many
+const SKIRT_ROOTS = ['ManhattanCityBlocks', 'ManhattanLandmarks', 'ManhattanStreetDetails', 'Boroughs'];
+function skirtObjects(scene) {
+  let n = 0;
+  for (const name of SKIRT_ROOTS) {
+    const root = scene.getObjectByName(name);
+    if (root) root.traverse((o) => {
+      if (!o.isMesh || o.isSkinnedMesh || o.userData.flatGeometry || o.userData.groundFixed) return;
+      o.userData.groundSkirt = true;
+      n++;
+    });
+  }
+  return n;
+}
+
+function createDemoGround(hill = DEMO_HILL) {
+  const { bounds, spacing } = demoGroundGrid(hill);
+  const drape = appDrape(bounds);
+  const stats = { mode: 'demo', hill, spacing, materials: 0, lights: 0, samplesMs: 0, setGroundMs: 0, drape: null };
+  return appGroundOf(drape, async () => {
+    const { lonLat, grid } = drape.ground.samples(spacing);
+    const heights = demoGroundHeights(lonLat, drape.frame, DEMO_SEA_LEVEL, hill);
+    // On Manhattan only, as the terrain: the boroughs' and New Jersey's own relief (the Palisades) stays as modelled
+    const keep = manhattanMask(grid);
+    for (let i = 0; i < heights.length; i++) if (!keep[i]) heights[i] = DEMO_SEA_LEVEL + DEMO_LAND;
+    return { heights, options: { seaLevel: DEMO_SEA_LEVEL, height0: DEMO_SEA_LEVEL + DEMO_LAND } };
+  }, stats, { fixed: APP_FIXED });
+}
+
+// The terrain's tiles are asked for at once, while the city builds, and awaited in attach(): its heights over
+// Manhattan, 0 elsewhere (THE APP ON THE GROUND), in metres above the sea, with nothing lifted at or under the deck's
+// own freeboard (2.2 m: set()'s seaLevel 0 and height0 2.2). Offline, or a tile that fails twice, leaves it flat
+function createTerrainGround() {
+  const drape = appDrape(TERRAIN_BOUNDS);
+  const stats = { mode: 'terrain', spacing: TERRAIN_SPACING, materials: 0, lights: 0, samplesMs: 0, setGroundMs: 0, drape: null };
+  const t0 = performance.now();
+  const { lonLat, cols, rows, grid } = drape.ground.samples(TERRAIN_SPACING);
+  const keep = manhattanMask(grid);
+  stats.samples = cols * rows;
+  stats.maskMs = Math.round(performance.now() - t0);
+  const where = GROUND_SCRIPT ? new URL('terrarium.mjs', GROUND_SCRIPT).href : './js/terrarium.mjs';
+  const loading = import(where)
+    .then((T) => T.loadTerrarium(lonLat, { keep }))
+    .then((r) => {
+      stats.tiles = r.tiles;
+      stats.bytes = r.bytes;
+      stats.fetchMs = r.ms;
+      return { heights: r.heights, options: { seaLevel: 0, height0: -WATER_Y } };
+    })
+    .catch((err) => {
+      stats.failed = String((err && err.message) || err);
+      console.warn(`[ground] ?ground=terrain: the elevation tiles couldn't be had (${stats.failed}); the city stays flat`);
+      return null;
+    });
+  return appGroundOf(drape, () => loading, stats, { fixed: APP_FIXED });
 }
 
 // The camera system's camera, placed flat (cameraSystem.currentPos, currentLookAt), lifted onto the ground as above
@@ -894,7 +1378,7 @@ function liftAppCamera(cameraSystem, ground) {
 }
 
 Object.assign(window.NYC, {
-  makeGeoFrame, makeGround, subdivideTriangles, prepareMaterials, createGroundDrape, demoGroundHeights, createAppGround,
-  DEMO_SEA_LEVEL
+  makeGeoFrame, makeGround, subdivideTriangles, conformTriangles, prepareMaterials, createGroundDrape, demoGroundHeights,
+  drapeGroundLayers, createAppGround, parseGroundOptions, demoGroundGrid, manhattanMask, skirtObjects, DEMO_SEA_LEVEL
 });
 })();

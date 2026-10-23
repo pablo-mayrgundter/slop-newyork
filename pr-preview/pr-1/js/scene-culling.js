@@ -211,6 +211,8 @@ function setupSceneCulling(scene, roots, shadow = null) {
         // A ground layer (js/ground.js groundLayers: its flat geometry kept, split to follow the ground later) casts
         // its own shadow: a stand-in, a copy of its flat geometry, wouldn't follow the ground
         if (o.userData.flatGeometry) return;
+        // Nor does what the ground leaves where it is (js/ground.js groundFixed): a stand-in would be lifted
+        if (o.userData.groundFixed) return;
         if (o.isInstancedMesh && o.count !== o.instanceMatrix.count) return;
         const tris = triangleCount(o.geometry) * (o.isInstancedMesh ? o.count : 1);
         if (tris < 20000) return;
