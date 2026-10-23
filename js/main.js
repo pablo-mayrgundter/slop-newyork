@@ -50,11 +50,13 @@ async function initApp() {
     loadingStatus.textContent = `Initializing Three.js r${THREE.REVISION} WebGPURenderer & TSL Shaders...`;
   }
 
-  // 1. Initialize Three.js WebGPURenderer with 32-bit float reversedDepthBuffer
+  // 1. Initialize Three.js WebGPURenderer with 32-bit float reversedDepthBuffer. ?webgl forces the WebGL2 backend, the
+  //    fallback of browsers without WebGPU (and the backend the guest, js/guest.js, always runs), in one that has it
   const renderer = new THREE.WebGPURenderer({
     antialias: true,
     powerPreference: 'high-performance',
-    reversedDepthBuffer: true
+    reversedDepthBuffer: true,
+    forceWebGL: new URLSearchParams(location.search).has('webgl')
   });
   renderer.setPixelRatio(1.0);
   renderer.setSize(window.innerWidth, window.innerHeight);
@@ -75,6 +77,11 @@ async function initApp() {
 
   await renderer.init();
   markInit('renderer');
+
+  // ?ground=demo (a made-up hill on Midtown, ?hill= and ?spread=) or ?ground=terrain (Manhattan's real ground, whose
+  // tiles load while the city builds): the city drawn over it (js/ground.js, THE APP ON THE GROUND), whose nodes go in
+  // before the city is built. null without it, and nothing below changes
+  const appGround = window.NYC.createAppGround(new URLSearchParams(location.search));
 
   // 2. Build Scene & Physical Atmospheric Sky / PMREM IBL / 4096x4096 Shadow Lighting
   const scene = new THREE.Scene();
@@ -116,8 +123,19 @@ async function initApp() {
   const touchControls = new TouchControls(controllerManager);
   markInit('controllers');
 
+  // The crowds (the pedestrians, the player on foot and the cyclist) skin each person from a storage buffer read by
+  // index (pedestrians.js), WebGPU only: on the WebGL2 fallback they'd smear into a sheet, so there they go undrawn
+  if (!renderer.backend.isWebGPUBackend) {
+    const crowdMeshes = [];
+    scene.traverse((o) => {
+      if (o.name === 'PeopleNear' || o.name === 'PeopleFar') crowdMeshes.push(o);
+    });
+    for (const mesh of crowdMeshes) mesh.removeFromParent();
+  }
+
   // Island-wide static geometry: chunk & distance-cull the small props, shadow stand-ins for the big casters
   // (scene-culling.js)
+  if (appGround) appGround.takeLayers(scene); // the ground layers, their instanced slabs baked before the culling set-up
   const cullingRoots = ['ManhattanCityGrid', 'ManhattanCityBlocks', 'ManhattanStreetDetails', 'ManhattanLandmarks', 'Boroughs']
     .map((name) => scene.getObjectByName(name))
     .filter(Boolean);
@@ -126,12 +144,15 @@ async function initApp() {
 
   // Small InstancedMeshes (<= 1000 instances) keep their matrices in uniform buffers that three.js
   // re-uploads on every draw of every pass (~2.5 MB/frame with the shadow cascades, stalling the GPU queue).
-  // Storage attributes are only uploaded when instanceMatrix.needsUpdate is set.
-  scene.traverse((object) => {
+  // Storage attributes are only uploaded when instanceMatrix.needsUpdate is set. WebGPU only: on the WebGL2 fallback
+  // (no navigator.gpu) instance matrices are vertex attributes already, and storage ones there drew the facade boxes
+  // as streaks across the island and left the towers out.
+  if (renderer.backend.isWebGPUBackend) scene.traverse((object) => {
     if (object.isInstancedMesh) {
       object.instanceMatrix = new THREE.StorageInstancedBufferAttribute(object.instanceMatrix.array, 16);
     }
   });
+  if (appGround) await appGround.attach(scene, markInit); // the lift into every material, the lamps, the ground (drape)
 
   // 5. TSL RenderPipeline with Half-Res Screen Space Reflections (SSRNode), Bloom & Filmic Toning
   //    SSR skips pixels with zero metalness, so fading it out with distance spares the far facades
@@ -520,6 +541,7 @@ async function initApp() {
     cameraSystem,
     lightingSystem,
     mapSystem,
+    ground: appGround,
     selectMode,
     selectCamera,
     cycleCamera,
@@ -639,6 +661,8 @@ async function initApp() {
     lightingSystem.update(cameraSystem.currentPos);
     mapSystem.update();
     if (warmedUp) updateSceneCulling(cameraSystem.camera.position); // the warm-up frame draws every chunk
+
+    if (appGround) appGround.beforeRender(cameraSystem); // the lamps and the camera onto the ground, for the render
 
     // Render frame via TSL RenderPipeline (SSR + Bloom)
     if (!warmedUp) {

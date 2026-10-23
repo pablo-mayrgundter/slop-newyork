@@ -150,12 +150,23 @@ const filteredPulse = Fn(([x, a, b, w]) => {
 });
 
 /**
+ * The fragment's world position with the road deck at y = 0, for patterns keyed to height above the street (storeys,
+ * kerbs, waterlines, signal lenses): positionWorld, less the lift of a guest that drapes the city over a host's terrain
+ * (js/guest.js sets NYC.groundLift, a varying, before it builds the city; the app has none). Fragment stage only: a
+ * positionNode sees the vertex before the lift. View vectors and distances keep positionWorld (the camera's frame)
+ */
+function deckPosition() {
+  const lift = window.NYC.groundLift;
+  return lift ? positionWorld.sub(vec3(0.0, lift, 0.0)) : positionWorld;
+}
+
+/**
  * Occlusion-Aware Urban Canyon Sky Visibility (aoNode)
  * Models how Manhattan street canyons occlude overhead sky irradiance near the street floor (y = 0..65m),
  * while opening up in Central Park and on upper tower shafts.
  */
 const canyonSkyAONode = Fn(() => {
-  const wp = positionWorld;
+  const wp = deckPosition();
   // Open sky inside Central Park (city-config.js CENTRAL_PARK_BOUNDS, 5th Ave to Central Park West, 59th to 110th St)
   const cp = window.NYC.CENTRAL_PARK_BOUNDS;
   const inParkX = smoothstep(cp.minX - 10.0, cp.minX + 20.0, wp.x).mul(float(1.0).sub(smoothstep(cp.maxX - 20.0, cp.maxX + 10.0, wp.x)));
@@ -435,7 +446,7 @@ function facadeCell(windowWidth, floorHeight, boxLocal, cornerPier = 0) {
     uCoord = gridU.mul(bayWidth);
   }
 
-  const vCoord = positionWorld.y;
+  const vCoord = deckPosition().y;
   const gridV = vCoord.div(floorHeight);
   const cellId = vec2(floor(gridU), floor(gridV));
   const cellUV = vec2(fract(gridU), fract(gridV));
@@ -1554,10 +1565,10 @@ function createParkWallMaterial() {
   };
 
   mat.colorNode = Fn(() => {
-    const wp = positionWorld;
+    const wp = deckPosition();
     const n = normalWorldGeometry;
     const f = wallField(wp, n);
-    const camDist = length(wp.sub(cameraPosition));
+    const camDist = length(positionWorld.sub(cameraPosition));
     const detail = smoothstep(160.0, 12.0, camDist);
     const rough = noise2D(vec2(f.z, wp.y).mul(5.0));
     const stone = mix(color(0x55524d), color(0x8a8378), f.x).mul(rough.mul(0.24).add(0.86));
@@ -1567,10 +1578,10 @@ function createParkWallMaterial() {
   })();
 
   mat.normalNode = Fn(() => {
-    const wp = positionWorld;
+    const wp = deckPosition();
     const n = normalWorldGeometry;
     const f = wallField(wp, n);
-    const camDist = length(wp.sub(cameraPosition));
+    const camDist = length(positionWorld.sub(cameraPosition));
     const detail = smoothstep(90.0, 8.0, camDist).mul(float(1.0).sub(smoothstep(0.6, 0.9, n.y)));
     const relief = noise2D(vec2(f.z, wp.y).mul(3.0)).mul(0.012).sub(f.y.mul(0.012));
     return bumpNormal(relief.mul(detail));
@@ -1659,7 +1670,7 @@ function createTktsStepMaterial(baseY = 0.24, riserH = 0.18) {
     roughness: 0.14,
     metalness: 0.08
   });
-  const stepFract = () => fract(positionWorld.y.sub(baseY).div(riserH));
+  const stepFract = () => fract(deckPosition().y.sub(baseY).div(riserH));
   mat.colorNode = Fn(() => {
     const n = normalWorldGeometry;
     const riser = abs(n.z).mul(float(1.0).sub(abs(n.y)));
@@ -1685,13 +1696,13 @@ function createMarbleAshlarMaterial() {
   const mat = new THREE.MeshStandardNodeMaterial({ metalness: 0.0, roughness: 0.6 });
   mat.aoNode = canyonSkyAONode();
   mat.colorNode = Fn(() => {
-    const wp = positionWorld;
+    const wp = deckPosition();
     const n = normalWorldGeometry;
     const vertical = float(1.0).sub(abs(n.y));
     const u = wp.x.mul(abs(n.z)).add(wp.z.mul(abs(n.x)));
     const row = floor(wp.y.div(0.62));
     const off = hash2D(vec2(row, 5.3)).mul(1.4);
-    const detail = smoothstep(240.0, 15.0, length(wp.sub(cameraPosition)));
+    const detail = smoothstep(240.0, 15.0, length(positionWorld.sub(cameraPosition)));
     const joints = max(gridLine(wp.y, 0.62, 0.012), gridLine(u.add(off), 1.45, 0.012)).mul(vertical).mul(detail);
     const blockTone = hash2D(vec2(floor(u.add(off).div(1.45)), row));
     const vein = noise2D(vec2(u.mul(1.3).add(wp.y.mul(0.7)), wp.y.mul(2.1)));
@@ -2560,7 +2571,7 @@ function createWaterMaterial() {
 
   const waveTex = getWaterWaveTexture();
   const harbourY = window.NYC.ISLAND_BOUNDS ? window.NYC.ISLAND_BOUNDS.waterLevel : -2.2;
-  const pond = smoothstep(harbourY + 1.0, harbourY + 2.0, positionWorld.y);
+  const pond = smoothstep(harbourY + 1.0, harbourY + 2.0, deckPosition().y);
 
   // [tile size (m), rotation (rad), RMS slope]: incommensurate scales & angles so no pattern repeats
   const LAYERS = [
@@ -3152,5 +3163,5 @@ function createCarFlareMaterial() {
   return mat;
 }
 
-Object.assign(window.NYC, { cityUniforms, WALL_KINDS, createCurtainWallMaterial, createPreWarBuildingMaterial, createFacadeBoxes, createChryslerCrownMaterial, createCarPaintMaterial, createFoliageMaterial, createTreeBarkMaterial, createTreeMaterial, createParkPavingMaterial, createParkWallMaterial, createIronFenceMaterial, createParkLampGlobeMaterial, createParkLampPoolMaterial, createTunnelShadeMaterial, createTktsStepMaterial, createMarbleAshlarMaterial, createTreeGrateMaterial, createRoadSurfaceMaterial, createRoadPaintMaterial, createSidewalkMaterial, createCurbMaterial, createBillboardMaterial, createWaterMaterial, createParkLawnMaterial, createSteamMaterial, createGodRayMaterial, createContactShadowMaterial, createHeadlightBeamMaterial, createCarFlareMaterial });
+Object.assign(window.NYC, { cityUniforms, WALL_KINDS, deckPosition, createCurtainWallMaterial, createPreWarBuildingMaterial, createFacadeBoxes, createChryslerCrownMaterial, createCarPaintMaterial, createFoliageMaterial, createTreeBarkMaterial, createTreeMaterial, createParkPavingMaterial, createParkWallMaterial, createIronFenceMaterial, createParkLampGlobeMaterial, createParkLampPoolMaterial, createTunnelShadeMaterial, createTktsStepMaterial, createMarbleAshlarMaterial, createTreeGrateMaterial, createRoadSurfaceMaterial, createRoadPaintMaterial, createSidewalkMaterial, createCurbMaterial, createBillboardMaterial, createWaterMaterial, createParkLawnMaterial, createSteamMaterial, createGodRayMaterial, createContactShadowMaterial, createHeadlightBeamMaterial, createCarFlareMaterial });
 })();

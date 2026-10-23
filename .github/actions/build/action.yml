@@ -1,0 +1,25 @@
+name: Stage the site
+description: >
+  Copy the files the site serves into dist/: the top-level pages (index.html,
+  guest.html) and the css/ and js/ they load. There's no build: the pages are
+  static and load three.js from jsDelivr, so this is the one list of what's
+  published, shared by production (pages.yml) and the PR previews
+  (pr-preview.yml). tests/, tools/ (tools/data is megabytes of build inputs),
+  README.md, LICENSE and dotfiles stay out. Every path in the pages is
+  relative, so the same files serve at /slop-newyork/ and under
+  /slop-newyork/pr-preview/pr-<n>/.
+
+runs:
+  using: composite
+  steps:
+    - name: Assemble dist/
+      shell: bash
+      run: |
+        set -euo pipefail
+        rm -rf dist
+        mkdir -p dist
+        # Every top-level page, so a new one (guest.html) needs no edit here.
+        cp ./*.html dist/
+        cp -r css js dist/
+        echo "Staged:"
+        find dist -type f | sort

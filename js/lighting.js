@@ -121,11 +121,17 @@ const TIME_PRESETS = {
   }
 };
 
+const _sunDir = new THREE.Vector3();
+
 class LightingSystem {
-  constructor(scene, renderer = null) {
+  // options.sky / options.fog (default true): a guest drawn inside another engine's world (guest.js) leaves the sky dome
+  // and the aerial fog to its host; the sky still bakes the IBL environment either way
+  constructor(scene, renderer = null, options = {}) {
     this.scene = scene;
     this.renderer = renderer;
     this.activePresetId = 'golden';
+    this.drawSky = options.sky !== false;
+    this.drawFog = options.fog !== false;
 
     // Assign SunLight its node implementation for WebGPURenderer (Light.registerNode since r187; r186 used the library)
     if (SunLight.registerNode) {
@@ -134,7 +140,7 @@ class LightingSystem {
       renderer.library.addLight(SunLightNode, SunLight);
     }
 
-    this.scene.fog = new THREE.FogExp2(0xdcc5ae, 0.00024);
+    if (this.drawFog) this.scene.fog = new THREE.FogExp2(0xdcc5ae, 0.00024);
     // Leave scene.background = null because SkyMesh renders the 360° sky dome, and setting
     // a THREE.Color on scene.background sets forceClear=true in WebGPURenderer's Background.update,
     // which would otherwise clear Cascade 0 when rendering Cascade 1 in SunShadowNode!
@@ -177,7 +183,7 @@ class LightingSystem {
       })();
     }
 
-    this.scene.add(this.sky);
+    if (this.drawSky) this.scene.add(this.sky);
 
     // Reusable PMREMGenerator & offscreen envScene (mirrors webgpu_generator_city.html)
     this.pmremGenerator = renderer ? new THREE.PMREMGenerator(renderer) : null;
@@ -214,7 +220,7 @@ class LightingSystem {
     // so helicopter / observatory views stay clearer than the horizon.
     this.uFogDensity = uniform(TIME_PRESETS.golden.fogDensity);
     this.uFogHeight = uniform(900.0);
-    if (this.envRenderTarget) this.scene.fogNode = this.createAerialFogNode();
+    if (this.envRenderTarget && this.drawFog) this.scene.fogNode = this.createAerialFogNode();
   }
 
   createAerialFogNode() {
@@ -246,7 +252,9 @@ class LightingSystem {
     });
     this.scene.environment = this.envRenderTarget.texture;
     this.sky.showSunDisc.value = 1;
-    this.scene.add(this.sky);
+    if (this.drawSky) this.scene.add(this.sky);
+    else this.envScene.remove(this.sky);
+    this.bakedSunDir = this.sky.sunPosition.value.clone();
   }
 
   applyPreset(presetId, force = false) {
@@ -265,8 +273,10 @@ class LightingSystem {
     this.hemiLight.groundColor.setHex(p.hemiGround);
     this.hemiLight.intensity = p.hemiIntensity;
 
-    this.scene.fog.color.setHex(p.fogColor);
-    this.scene.fog.density = p.fogDensity;
+    if (this.scene.fog) {
+      this.scene.fog.color.setHex(p.fogColor);
+      this.scene.fog.density = p.fogDensity;
+    }
     if (this.uFogDensity) this.uFogDensity.value = p.fogDensity;
 
     // Update physical Preetham SkyMesh uniforms
@@ -292,6 +302,23 @@ class LightingSystem {
 
     this.scene.environmentIntensity = p.envIntensity;
     this.bakeEnvironmentMap();
+  }
+
+  // A sun direction from outside (a host engine's real sun, y up): the preset for its elevation sets the colours, the
+  // direction itself moves the sun light, the sky and the facade reflections. Under the horizon the midnight preset keeps
+  // its own (moonlit) direction; just above it the light is held 3° up so it never shines from under the streets. The
+  // environment map re-bakes only when the preset changes or the sun has moved more than ~2° since the last bake.
+  setSunDirection(dir) {
+    const d = _sunDir.copy(dir).normalize();
+    const presetId = d.y < -0.1 ? 'midnight' : d.y < 0.07 ? 'twilight' : d.y < 0.5 ? 'golden' : 'midday';
+    this.applyPreset(presetId); // a no-op unless the preset changes
+    if (presetId === 'midnight') return;
+    if (d.y < 0.05) d.set(d.x, 0, d.z).normalize().multiplyScalar(Math.cos(0.05)).setY(Math.sin(0.05));
+    this.sunLight.position.copy(d);
+    this.sunLight.updateMatrixWorld();
+    this.sky.sunPosition.value.copy(d);
+    cityUniforms.uSkySunDir.value.copy(d);
+    if (!this.bakedSunDir || this.bakedSunDir.dot(d) < 0.9994) this.bakeEnvironmentMap();
   }
 
   update(focusPos) {
