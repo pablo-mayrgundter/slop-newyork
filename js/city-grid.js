@@ -1457,6 +1457,7 @@ function buildCityGrid(scene) {
   const harborWaterGeo = new THREE.PlaneGeometry(60000, 60000, 1, 1);
   harborWaterGeo.rotateX(-Math.PI / 2);
   const harborWaterMesh = new THREE.Mesh(harborWaterGeo, waterMat);
+  harborWaterMesh.name = 'HarborWater';
   harborWaterMesh.position.set(0, ISLAND_BOUNDS.waterLevel, -50);
   group.add(harborWaterMesh);
 

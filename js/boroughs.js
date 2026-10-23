@@ -3390,5 +3390,5 @@ function buildBoroughs(scene, { sidewalks = [] } = {}) {
   return { group, ridgeHeightAt, landAt, colliders: bridgeSite.colliders.concat(tram.colliders), update: tram.update };
 }
 
-Object.assign(window.NYC, { buildBoroughs, ridgeHeightAt, boroughLandAt: landAt });
+Object.assign(window.NYC, { buildBoroughs, ridgeHeightAt, boroughLandAt: landAt, lonLatToWorld: LL });
 })();
