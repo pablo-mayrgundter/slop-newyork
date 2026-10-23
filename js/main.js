@@ -108,11 +108,6 @@ async function initApp() {
   markInit('traffic');
   const highwayTraffic = createHighwayTraffic(scene, cityGrid.highwayLanes);
   buildRoadPaint(scene, trafficSystem.network);
-  // The crowds skin each person from a storage buffer read by index (pedestrians.js), WebGPU only: on the WebGL2
-  // fallback they'd smear into a sheet, so there the pedestrians walk undrawn
-  if (!renderer.backend.isWebGPUBackend) {
-    for (const name of ['PeopleNear', 'PeopleFar']) scene.getObjectByName(name)?.removeFromParent();
-  }
   markInit('roadPaint');
 
   // 4. Initialize Third-Person Controllers (Person, Car, Cyclist, Helicopter) & Multi-Camera System
@@ -120,6 +115,16 @@ async function initApp() {
   const cameraSystem = new CameraSystem(renderer.domElement, controllerManager);
   const touchControls = new TouchControls(controllerManager);
   markInit('controllers');
+
+  // The crowds (the pedestrians, the player on foot and the cyclist) skin each person from a storage buffer read by
+  // index (pedestrians.js), WebGPU only: on the WebGL2 fallback they'd smear into a sheet, so there they go undrawn
+  if (!renderer.backend.isWebGPUBackend) {
+    const crowdMeshes = [];
+    scene.traverse((o) => {
+      if (o.name === 'PeopleNear' || o.name === 'PeopleFar') crowdMeshes.push(o);
+    });
+    for (const mesh of crowdMeshes) mesh.removeFromParent();
+  }
 
   // Island-wide static geometry: chunk & distance-cull the small props, shadow stand-ins for the big casters
   // (scene-culling.js)
