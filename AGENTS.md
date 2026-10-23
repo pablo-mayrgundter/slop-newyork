@@ -48,7 +48,7 @@ code.
   `python3 -m http.server 8000`) and open `/`.
   - A new script goes into `nycAppScripts` at the point where what it
     reads from `window.NYC` is already defined.
-- **Tests:** `node --test tests/*.cjs tests/*.mjs` (106 tests, about
+- **Tests:** `node --test tests/*.cjs tests/*.mjs` (114 tests, about
   40 s). Plain `node --test tests/` fails, so use the globs. The tests
   run the scripts in `node:vm` with stubs for `window.NYC`, three.js
   and the DOM, or parse index.html and the scripts as text. No GPU and
@@ -68,6 +68,30 @@ code.
     (`forceWebGL: true`), because NetGL records WebGL2.
   - guest.html takes `?shadows=0` and `?extent=all` (the default,
     `manhattan`, leaves out the other boroughs and the harbour's water).
+  - A host that draws the guest into its own framebuffer (Cesium's
+    `scene.externalRenderers`, js/guest-cesium.mjs
+    `cesiumExternalRenderer`) needs `composite: true` and, under log
+    depth, `logDepth: true` (js/guest.js, THE HOST'S FRAME). Without
+    `composite`, WebGPURenderer's sRGB output draws into a target of its
+    own and copies it over the whole screen with no depth, which blacks
+    out the host's frame; without `logDepth` the city fails the depth
+    test everywhere under Cesium's log depth. Anything that changes every
+    material goes into `prepareMaterials`, the one pass before compile.
+  - Depth goes in through a material's `setupDepth`, not its
+    `depthNode`: three's shadow pass takes the material's `depthNode` for
+    the shadow map (`_getShadowNodes` in three.webgpu.js), so a log
+    `depthNode` would corrupt the cascades.
+  - The headless Cesium harness (the fork's
+    `Build/CesiumUnminified`, AWS Terrarium terrain through
+    `CustomHeightmapTerrainProvider`, the city through
+    `cesiumExternalRenderer`) takes 35–50 s to compile the city's
+    programs on its first frame at 480×300, then 0.05–0.2 s a frame.
+    Freeze the terrain (`RequestScheduler.maximumRequests = 0`) once the
+    tiles settle, so frames repeat bit for bit.
+  - The sun's cascades reach only 300–720 m from the camera
+    (lighting.js `update`). A view whose ground starts farther away (a
+    camera 450 m up pitched −11° meets the ground 2.3 km out) shows no
+    shadows: frames with shadows on and off then differ only in noise.
 - **The world frame:** 1 unit = 1 m, x = grid east, y = up, z = grid
   south (north is -z), origin at the centrelines of 5th Ave & 42nd St.
   It's the tangent plane at 40.75318°N, 73.98185°W on WGS84, turned

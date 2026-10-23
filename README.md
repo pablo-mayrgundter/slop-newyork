@@ -20,7 +20,7 @@ const guest = await createNYCGuest({ canvas, context, width, height }); // exten
 await guest.compile();
 // each frame
 guest.setView({ matrixWorld, projectionMatrix }); // the camera in the city's frame, column-major
-guest.setSun(sunDirection);                       // a THREE.Vector3 in the city's frame, y up
+guest.setSun(sunDirection);                       // { x, y, z } toward the sun in the city's frame, y up
 guest.update(dt);
 guest.render();
 ```
@@ -61,6 +61,66 @@ const modelMatrix = cityModelMatrix(guest, Cesium);              // ENU at (lon0
 `inverseViewMatrix` is the `matrixWorld` for `setView`. `seaLevel` defaults to −32.7 m (mean sea level over the WGS84
 ellipsoid at Manhattan, as in Cesium World Terrain). [`guest.html?ground=demo`](guest.html?ground=demo) drapes the city
 over a made-up 40 m hill on Midtown, with no host.
+
+### Inside a host's frame
+
+A host that draws the guest into its own framebuffer, against its own depth, rather than compositing a separate canvas,
+creates it with two more options:
+
+```js
+const guest = await createNYCGuest({ canvas, context, width, height, composite: true, logDepth: true });
+guest.setView({ matrixWorld, projectionMatrix, near, far });             // near and far as the host has them
+guest.setDepth({ near, oneOverLog2FarDepthFromNearPlusOne });            // each frustum, or null for standard depth
+guest.setLinearOutput(false);                                             // true for a host rendering in linear HDR
+```
+
+- **`composite`** (default `false`): no clears, no output render target and no tone mapping. With an sRGB output or a
+  tone mapping, three's WebGPURenderer draws into a target of its own and copies it over the whole screen with no depth,
+  which wipes the host's frame; so the renderer outputs linear and each material encodes sRGB itself (its
+  `outputNode`), or not, with `setLinearOutput(true)`.
+- **`logDepth`** (default `false`): every material writes the host's logarithmic depth, Cesium's
+  `log2(w − near + 1) · oneOverLog2FarDepthFromNearPlusOne` (`w` the distance along the view direction), from uniforms
+  `setDepth()` sets; `setDepth(null)` writes the standard depth of the camera's near and far. It goes in through each
+  material's `setupDepth`, so the shadow maps keep the light's own depth.
+- **`setView`'s `near` and `far`** are optional; without them they are read back from the projection, which is
+  ill-conditioned when far / near is large (Cesium's single log-depth frustum is ~1e7).
+- `guest.bounds()` is what the guest draws, a `{ min, max }` box in the city's frame with the ground's lift.
+
+Both go in with the ground's lift, in one pass over the materials before they compile; with neither the guest is as
+before. On Cesium with `scene.externalRenderers` (a Cesium with the external render pass, as
+[celestiary's fork](https://github.com/celestiary/cesium/tree/celestiary/external-render-pass)), `js/guest-cesium.mjs`
+builds the whole renderer, the guest replaying through a [NetGL](https://github.com/pablo-mayrgundter/portal) immediate
+link into Cesium's own context:
+
+```js
+import { makeNetGLImmediateLink, makeNetGLGuestContext } from 'portal-netgl';
+import { groundFromCesium, cesiumScreenFramebuffer, cesiumExternalRenderer } from './js/guest-cesium.mjs';
+
+const screen = cesiumScreenFramebuffer(); // the replay's screen: the framebuffer of the pass the city is drawn in
+const link = makeNetGLImmediateLink({ gl: scene.context._gl, replay: { screenFramebuffer: screen } });
+const guestCtx = makeNetGLGuestContext({ canvas, transport: link.transport });
+const guest = await createNYCGuest({ canvas, context: guestCtx.gl, width, height, composite: true, logDepth: true });
+await groundFromCesium(guest, Cesium, scene.terrainProvider);
+await guest.compile();
+scene.externalRenderers.add(cesiumExternalRenderer(guest, Cesium, { link, guestCtx, screen }));
+```
+
+Cesium calls it in each frustum the city's box overlaps, after the opaque geometry: it takes Cesium's view × the city's
+model matrix in doubles into `setView` with the frustum's near and far, sets `setDepth` when Cesium writes log depth,
+points the replay at the pass's framebuffer and runs one guest frame on the link. Once a Cesium frame (by
+`frameNumber`) it sets the sun from Cesium's and steps the simulation (`dt: (p) => seconds` to step it otherwise,
+`sun: false` to set the sun yourself). The link's `screenFramebuffer` is fixed when the link is made, before the
+guest and its renderer exist, hence `screen`: a function the renderer points at each pass's framebuffer. The other
+helpers, for a host of your own:
+
+```js
+cityBoundingVolume(guest, Cesium, modelMatrix);  // a Cesium.OrientedBoundingBox of guest.bounds() on the globe
+cityBoundingSphere(guest, Cesium, modelMatrix);  // the sphere around it
+sunFromCesium(guest, Cesium, p, modelMatrix);    // p.sunDirectionWC in the city's frame, for guest.setSun
+```
+
+The renderer's bounding volume follows the ground when `setGround` moves it. It assumes the pass's viewport starts at
+the origin (Cesium's does, outside VR), and resizes the guest to the pass.
 
 ## License and data
 

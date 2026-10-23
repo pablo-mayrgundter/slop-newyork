@@ -184,3 +184,124 @@ test('set fills heights the host had none for, and holds the city\'s freeboard o
   assert.ok(Math.abs(hole) < 1e-4, `hole ${hole}`);
   assert.throws(() => ground.set(new Array(cols * rows).fill(NaN)), /no finite heights/);
 });
+
+// THE HOST'S FRAME (js/guest.js): the options, the material pass, the view and the bounds, without a GPU
+function loadGuest() {
+  const LL = read('js/boroughs.js').match(/function LL\(lon, lat\) \{[^]*?\n\}/)[0];
+  const window = { NYC: { THREE: { Matrix4 }, TSL: {}, Addons: {} } };
+  const context = vm.createContext({ window, Math });
+  vm.runInContext(`${LL}; window.NYC.lonLatToWorld = LL;`, context);
+  vm.runInContext(read('js/guest.js'), context);
+  return window.NYC;
+}
+const plain = (o) => JSON.parse(JSON.stringify(o));
+
+test('composite and logDepth are off by default, and the other options keep their defaults', () => {
+  const { guestOptions } = loadGuest();
+  assert.deepEqual(plain(guestOptions()), {
+    extent: 'manhattan', shadows: true, clearAlpha: 0, pixelRatio: 1, composite: false, logDepth: false
+  });
+  assert.deepEqual(plain(guestOptions({ extent: 'all', shadows: false, clearAlpha: 1, pixelRatio: 2, composite: true, logDepth: true })), {
+    extent: 'all', shadows: false, clearAlpha: 1, pixelRatio: 2, composite: true, logDepth: true
+  });
+  // Only true turns them on
+  const o = guestOptions({ composite: 1, logDepth: 'yes', extent: 'brooklyn' });
+  assert.equal(o.composite, false);
+  assert.equal(o.logDepth, false);
+  assert.equal(o.extent, 'manhattan');
+});
+
+test('the material pass sees each node material once, and keys its program by what it added', () => {
+  const { prepareMaterials } = loadGuest();
+  const mat = (extra = {}) => ({ isNodeMaterial: true, outputNode: null, customProgramCacheKey() { return 'base'; }, ...extra });
+  const shared = mat();
+  const placed = mat({ vertexNode: {} }); // places its own vertices: no lift
+  const classic = { isNodeMaterial: false, customProgramCacheKey() { return 'classic'; } };
+  const own = mat({ outputNode: 'own' });
+  const objects = [{ material: shared }, { material: [shared, placed] }, { material: classic }, { material: own }, {}];
+  const scene = { traverse: (fn) => objects.forEach(fn) };
+
+  const lifted = [];
+  const setupDepth = function () {};
+  const n = prepareMaterials(scene, { lift: (m) => lifted.push(m), output: (node) => ['srgb', node], setupDepth });
+  assert.equal(n, 3);
+  assert.deepEqual(lifted, [shared, own]);
+  assert.equal(shared.customProgramCacheKey(), 'base:ground:composite:logdepth');
+  assert.equal(placed.customProgramCacheKey(), 'base:composite:logdepth');
+  assert.equal(classic.customProgramCacheKey(), 'classic');
+  assert.deepEqual(shared.outputNode, ['srgb', null]);
+  assert.deepEqual(own.outputNode, ['srgb', 'own']);
+  assert.equal(shared.setupDepth, setupDepth);
+  assert.equal(shared.depthNode, undefined, 'the depth goes in through setupDepth: a shadow pass takes a depthNode for its own');
+
+  // The ground alone, as before composite and logDepth: only the lift and its key
+  const a = mat();
+  const b = mat({ vertexNode: {} });
+  prepareMaterials({ traverse: (fn) => [{ material: [a, b] }].forEach(fn) }, { lift: () => {} });
+  assert.equal(a.customProgramCacheKey(), 'base:ground');
+  assert.equal(b.customProgramCacheKey(), 'base');
+  assert.equal(a.outputNode, null);
+  assert.equal(a.setupDepth, undefined);
+});
+
+// A camera whose matrices only take arrays: what applyView reads back is fov, aspect, near and far
+function stubCamera() {
+  const m = () => ({ elements: null, fromArray(a) { this.elements = Array.from(a); return this; }, copy() { return this; }, invert() { return this; }, decompose() {} });
+  return { matrixWorld: m(), matrixWorldInverse: m(), projectionMatrix: m(), projectionMatrixInverse: m() };
+}
+const perspective = (fovDeg, aspect, near, far) => {
+  const f = 1 / Math.tan((fovDeg * Math.PI) / 360);
+  return [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, -(far + near) / (far - near), -1, 0, 0, (-2 * far * near) / (far - near), 0];
+};
+const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+test('setView takes near and far as given, and decodes them from the projection only without them', () => {
+  const { applyView } = loadGuest();
+  // Cesium's single log-depth frustum over Manhattan: 0.1 m to 714 km
+  const near = 0.1;
+  const far = 713851.19;
+  const p = perspective(60, 1.6, near, far);
+  const cam = stubCamera();
+  applyView(cam, { matrixWorld: IDENTITY, projectionMatrix: p, near, far });
+  assert.equal(cam.near, near);
+  assert.equal(cam.far, far);
+  assert.ok(Math.abs(cam.fov - 60) < 1e-9 && Math.abs(cam.aspect - 1.6) < 1e-12);
+  assert.equal(cam.matrixAutoUpdate, false);
+  // Decoded from doubles it's close; from the same matrix in single precision (as a GPU-bound array holds it), far
+  // is lost: p[10] + 1 is ~3e-7, under float32's resolution at 1
+  applyView(cam, { matrixWorld: IDENTITY, projectionMatrix: p });
+  assert.ok(Math.abs(cam.far / far - 1) < 1e-6, `far ${cam.far}`);
+  applyView(cam, { matrixWorld: IDENTITY, projectionMatrix: Float32Array.from(p) });
+  assert.ok(!(Math.abs(cam.far / far - 1) < 0.1), `float32 far ${cam.far} decoded within 10%`);
+  applyView(cam, { matrixWorld: IDENTITY, projectionMatrix: Float32Array.from(p), near, far });
+  assert.equal(cam.far, far);
+});
+
+test('the bounds take the flat box with the ground\'s lift and the curve, padded', () => {
+  const { makeGeoFrame, makeGround, liftBounds } = loadGuest();
+  const frame = makeGeoFrame();
+  const ground = makeGround(frame);
+  const box = { min: { x: -2300, y: -30, z: -7200 }, max: { x: 2600, y: 540, z: 6600 } };
+  // Before the ground: the box, padded
+  assert.deepEqual(plain(liftBounds(box, ground, 10)), {
+    min: { x: -2310, y: -40, z: -7210 }, max: { x: 2610, y: 550, z: 6610 }
+  });
+  // A 60 m slope over the island: the box rises by its most and sinks by its least, less the curve at its far corner
+  const { cols, rows } = ground.samples(200);
+  ground.set(gridPoints(ground, cols, rows).map(([x, z]) => -10 + 0.004 * x - 0.002 * z));
+  const lift = ground.liftRange(box.min.x, box.max.x, box.min.z, box.max.z);
+  const t = ground.tangent;
+  const corner = Math.max(...[[box.min.x, box.min.z], [box.min.x, box.max.z], [box.max.x, box.min.z], [box.max.x, box.max.z]]
+    .map(([x, z]) => (x - t.x) ** 2 + (z - t.z) ** 2)) * ground.curvature;
+  assert.ok(Math.abs(lift.min - (ground.range.min - corner)) < 1e-9);
+  assert.equal(lift.max, ground.range.max, 'the tangent point is inside the box: no curve off the most');
+  // Every grid point's lift is inside the range
+  for (const [x, z] of gridPoints(ground, cols, rows)) {
+    if (x < box.min.x || x > box.max.x || z < box.min.z || z > box.max.z) continue;
+    const o = ground.offsetAt(x, z);
+    assert.ok(o >= lift.min - 1e-6 && o <= lift.max + 1e-6, `${x}, ${z}: ${o}`);
+  }
+  const b = liftBounds(box, ground, 0);
+  assert.ok(Math.abs(b.min.y - (box.min.y + lift.min)) < 1e-9 && Math.abs(b.max.y - (box.max.y + lift.max)) < 1e-9);
+  assert.equal(b.min.x, box.min.x);
+});
