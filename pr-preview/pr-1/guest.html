@@ -11,6 +11,7 @@
     canvas { display: block; width: 100%; height: 100%; }
     #panel { position: fixed; left: 12px; bottom: 12px; padding: 8px 10px; border-radius: 8px; background: rgba(0, 0, 0, 0.55); }
     #panel input { vertical-align: middle; width: 180px; }
+    #perf { margin-top: 4px; font: 12px ui-monospace, monospace; white-space: pre; }
   </style>
   <!-- three.js dev branch, as index.html -->
   <script type="importmap">
@@ -29,24 +30,34 @@
   <div id="panel">
     <label>Sun <input id="hour" type="range" min="4" max="22" step="0.25" value="16" /> <span id="hour-label"></span></label>
     · <span id="status">Loading…</span>
+    <div id="perf"></div>
   </div>
   <script type="module">
     // A stand-in host: its own camera (orbiting Midtown), its own sun (an hour of a day in late October, roughly), and
     // the loop. The page's background shows through where the guest draws nothing (the guest clears to alpha 0).
+    //   ?view=aerial   the orbit over Midtown, 520 m up (default); street: at a driver's eye on 5th Ave at 37th St,
+    //                  looking north; park: 40 m over Central Park's south end at 6th Ave, looking north
+    //   ?ground=demo   a hill under Midtown, as a host's terrain (below)
+    //   ?shadows=0, ?lights=0, ?extent=all   the guest's shadows, lamps and extent (js/guest.js, THE GUEST)
+    //   ?dpr=1         the drawing buffer in CSS pixels (default the device's: 4x the pixels on a 2x screen)
+    // The panel reads out the frame rate, the frame time, and the JavaScript time in update() and render() (render's
+    // includes any wait on the GPU), with the draws and triangles of a frame, shadow passes included
     import { createNYCGuest } from './js/guest-entry.mjs';
 
     const canvas = document.getElementById('c');
     const status = document.getElementById('status');
     const hourInput = document.getElementById('hour');
     const hourLabel = document.getElementById('hour-label');
-    const size = () => [Math.round(canvas.clientWidth * devicePixelRatio), Math.round(canvas.clientHeight * devicePixelRatio)];
+    const params = new URLSearchParams(location.search);
+    const dpr = Number(params.get('dpr')) || devicePixelRatio;
+    const size = () => [Math.round(canvas.clientWidth * dpr), Math.round(canvas.clientHeight * dpr)];
     let [w, h] = size();
     canvas.width = w;
     canvas.height = h;
 
-    const params = new URLSearchParams(location.search);
     const guest = await createNYCGuest({
-      canvas, width: w, height: h, extent: params.get('extent') || 'manhattan', shadows: params.get('shadows') !== '0'
+      canvas, width: w, height: h, extent: params.get('extent') || 'manhattan', shadows: params.get('shadows') !== '0',
+      lights: params.get('lights') !== '0'
     });
     window.__NYC_GUEST = guest;
     const { THREE } = window.NYC;
@@ -89,8 +100,61 @@
     await guest.compile();
     status.textContent = 'Ready';
 
-    // The host's camera, handed over as matrices each frame (as a host engine would)
+    // The host's camera, handed over as matrices each frame (as a host engine would), standing on the ground
     const hostCamera = new THREE.PerspectiveCamera(50, w / h, 1, 60000);
+    const { avenueX, streetZ } = window.NYC;
+    const onGround = (x, y, z) => new THREE.Vector3(x, y + guest.groundOffsetAt(x, z), z);
+    const VIEWS = {
+      aerial: (angle) => [onGround(Math.sin(angle) * 1400, 520, Math.cos(angle) * 1400 - 300), onGround(0, 0, -300)],
+      street: () => [onGround(avenueX('5'), 2.5, streetZ(37)), onGround(avenueX('5'), 2.5, streetZ(37) - 300)],
+      park: () => [onGround(avenueX('6'), 40, streetZ(58)), onGround(avenueX('6'), 0, streetZ(58) - 500)]
+    };
+    const view = VIEWS[params.get('view')] || VIEWS.aerial;
+    window.__NYC_VIEWS = VIEWS; // [eye, target] by name, for probes
+    // Near and far for where the camera is. A real host hands over its own projection (Cesium its frustums, and under
+    // its log depth the guest's logDepth). This stand-in draws into a 24-bit depth buffer with no reversed-Z (the app's
+    // float reversed-Z needs EXT_clip_control, which bypasses a NetGL recorder), whose step at distance d is about
+    // d² / (near · 2^24): at a fixed 1 m near that's 0.13 m at the orbit's 1.5 km, coarser than the centimetres between
+    // the deck, the paint, the kerbs and the lawns, which z-fought. Nothing comes nearer than a fraction of the height
+    // over the ground (the towers' tops aside), so near scales with it: 26 m at the orbit (5 mm steps at 1.5 km),
+    // 0.3 m in the street
+    function fitNearFar(camera) {
+      const { x, y, z } = camera.position;
+      camera.near = Math.min(Math.max(0.05 * (y - guest.groundOffsetAt(x, z)), 0.3), 50);
+      camera.far = 60000;
+    }
+    window.__NYC_NEAR = fitNearFar; // for probes
+    function placeCamera(angle) {
+      const [eye, target] = view(angle);
+      hostCamera.position.copy(eye);
+      hostCamera.lookAt(target);
+      hostCamera.updateMatrixWorld();
+      fitNearFar(hostCamera);
+      hostCamera.updateProjectionMatrix();
+    }
+
+    // The readout, over half-second windows
+    const perfEl = document.getElementById('perf');
+    const stats = { frames: 0, frameMs: 0, updateMs: 0, renderMs: 0, since: performance.now(), last: null };
+    window.__NYC_PERF = stats;
+    function readout(now) {
+      const n = stats.frames;
+      if (!n || now - stats.since < 500) return;
+      const info = guest.renderer.info.render;
+      stats.last = {
+        fps: (n * 1000) / (now - stats.since),
+        frameMs: stats.frameMs / n,
+        updateMs: stats.updateMs / n,
+        renderMs: stats.renderMs / n,
+        draws: info.drawCalls,
+        triangles: info.triangles
+      };
+      const l = stats.last;
+      perfEl.textContent = `${l.fps.toFixed(1)} fps  frame ${l.frameMs.toFixed(1)} ms  update ${l.updateMs.toFixed(1)} ms  render ${l.renderMs.toFixed(1)} ms\n` +
+        `${l.draws} draws  ${(l.triangles / 1e6).toFixed(2)}M triangles  ${w}x${h}`;
+      Object.assign(stats, { frames: 0, frameMs: 0, updateMs: 0, renderMs: 0, since: now });
+    }
+
     let last = performance.now();
     let angle = 0;
     function frame(now) {
@@ -105,13 +169,18 @@
         hostCamera.aspect = w / h;
       }
       angle += dt * 0.05;
-      hostCamera.position.set(Math.sin(angle) * 1400, 520, Math.cos(angle) * 1400 - 300);
-      hostCamera.lookAt(0, 0, -300);
-      hostCamera.updateMatrixWorld();
-      hostCamera.updateProjectionMatrix();
+      placeCamera(angle);
       guest.setView({ matrixWorld: hostCamera.matrixWorld.elements, projectionMatrix: hostCamera.projectionMatrix.elements });
+      const t0 = performance.now();
       guest.update(dt);
+      const t1 = performance.now();
       guest.render();
+      const t2 = performance.now();
+      stats.frames++;
+      stats.frameMs += dt * 1000;
+      stats.updateMs += t1 - t0;
+      stats.renderMs += t2 - t1;
+      readout(t2);
       requestAnimationFrame(frame);
     }
     requestAnimationFrame(frame);

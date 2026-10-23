@@ -226,6 +226,308 @@ function fillHoles(h, cols, rows) {
   }
 }
 
+// The lift moves vertices, and a flat triangle stays flat between them: a layer built from a few long triangles (the
+// road deck is the island's outline cut into ~700 triangles kilometres long; the seawall's top and the lawns are alike)
+// cuts straight through a hill, metres under or over the finely built layers on it (the sidewalks, the paint, the
+// paths), which the ground carries on the hill itself. Under guest.html's demo hill the deck ran up to 29 m below the
+// ground and Central Park's lawn 14 m above it, crossing the layers a few centimetres over them in long bands of
+// z-fighting. So once the ground is set, the ground layers' triangles split where the ground bends away from them:
+// along their longest edge, until the ground is within DRAPE_TOLERANCE of each triangle at seven points over it (the
+// paint stands 12 mm over the deck), or it is under DRAPE_MIN_EDGE across; none stays longer than DRAPE_MAX_CELLS of
+// the ground's cells. Flat ground costs nothing, a hill what its bends need. The layers are the triangles at the street
+// (DRAPE_BAND, world y: buildings, lamps and trees leave it by their tops) of the ground's groups (DRAPE_ROOTS), but not
+// the faces looking down. The instanced slabs among them (the rectangular sidewalks and their curbs, up to ~500 m long,
+// the blocks' back yards) are baked into one mesh each when the guest is built. Each setGround() splits the layers again from their flat
+// geometry. The shadow stand-ins (scene-culling.js) are copies of the flat geometry: a curb's shadow on a hill can
+// stray by the curb's lift error
+const DRAPE_ROOTS = ['ManhattanCityGrid', 'RoadMarkings'];
+const DRAPE_SLAB_ROOTS = ['ManhattanCityBlocks']; // only their instanced slabs (the back yards), not the buildings
+const DRAPE_BAND = [-3, 3.5];
+const DRAPE_TOLERANCE = 0.004;
+const DRAPE_MIN_EDGE = 2;
+const DRAPE_MAX_CELLS = 4;
+// Where in a triangle the ground is checked: barycentric (u, v) for the second and third corners
+const DRAPE_PROBES = [[1 / 3, 1 / 3], [0.5, 0], [0, 0.5], [0.5, 0.5], [2 / 3, 1 / 6], [1 / 6, 2 / 3], [1 / 6, 1 / 6]];
+
+// Splits triangles in turn along their longest edge (in x, z) while needsSplit(ax, az, bx, bz, cx, cz, longest) says so
+// (the corners' world x and z, and their longest edge's length in x, z), splitting each edge that is split in every
+// triangle that has it, so the mesh stays watertight. needsSplit may be a number: split while the longest edge is
+// longer. mesh: { attrs: { name: { array, itemSize } } per vertex, index (or null), world (x, y, z per vertex) }. A
+// triangle takes part when its corners' world y are within band and it doesn't face down. Every attribute is
+// interpolated linearly ('normal' renormalised). Returns null when nothing was split, else { attrs: { name:
+// Float32Array }, index: Uint32Array, vertices, triangles }
+function subdivideTriangles(mesh, needsSplit, band = DRAPE_BAND) {
+  if (typeof needsSplit === 'number') {
+    const maxEdge = needsSplit;
+    needsSplit = (ax, az, bx, bz, cx, cz, longest) => longest > maxEdge;
+  }
+  const count = mesh.world.length / 3;
+  const tris = mesh.index || Uint32Array.from({ length: count }, (_, i) => i);
+  // The vertices: the mesh's own (read in place), then the new ones
+  const names = Object.keys(mesh.attrs);
+  const sizes = names.map((n) => mesh.attrs[n].itemSize);
+  const own = names.map((n) => mesh.attrs[n].array);
+  const added = names.map(() => []);
+  const ownW = mesh.world;
+  const addedW = [];
+  const X = (p) => (p < count ? ownW[3 * p] : addedW[3 * (p - count)]);
+  const Y = (p) => (p < count ? ownW[3 * p + 1] : addedW[3 * (p - count) + 1]);
+  const Z = (p) => (p < count ? ownW[3 * p + 2] : addedW[3 * (p - count) + 2]);
+  const len = (p, q) => {
+    const dx = X(p) - X(q);
+    const dz = Z(p) - Z(q);
+    return Math.sqrt(dx * dx + dz * dz); // not Math.hypot: several times slower, and this runs millions of times
+  };
+  // An edge is known by its midpoint, to the centimetre (an edge's two triangles may hold copies of its corners with
+  // their own normals and uvs). x and z within ±10 km, y clamped (exact within the band): under 2^53
+  const edgeKey = (p, q) => {
+    const y = Math.min(Math.max(Math.round((Y(p) + Y(q)) * 50) + 500, 0), 999);
+    return (Math.round((X(p) + X(q)) * 50) + 1e6) * 4e9 + (Math.round((Z(p) + Z(q)) * 50) + 1e6) * 1e3 + y;
+  };
+  const kept = [];
+  let active = [];
+  for (let t = 0; t < tris.length; t += 3) {
+    const a = tris[t];
+    const b = tris[t + 1];
+    const c = tris[t + 2];
+    const [ay, by, cy] = [Y(a), Y(b), Y(c)];
+    // facing down: the normal's y under -0.5
+    const e1x = X(b) - X(a);
+    const e1y = by - ay;
+    const e1z = Z(b) - Z(a);
+    const e2x = X(c) - X(a);
+    const e2y = cy - ay;
+    const e2z = Z(c) - Z(a);
+    const nx = e1y * e2z - e1z * e2y;
+    const ny = e1z * e2x - e1x * e2z;
+    const nz = e1x * e2y - e1y * e2x;
+    const inBand = Math.min(ay, by, cy) >= band[0] && Math.max(ay, by, cy) <= band[1];
+    (inBand && ny >= -0.5 * Math.sqrt(nx * nx + ny * ny + nz * nz) ? active : kept).push(a, b, c);
+  }
+  const mid = (p, q) => {
+    const v = count + addedW.length / 3;
+    for (let k = 0; k < names.length; k++) {
+      const n = sizes[k];
+      const d = added[k];
+      const at = (r, j) => (r < count ? own[k][r * n + j] : d[(r - count) * n + j]);
+      const o = d.length;
+      for (let j = 0; j < n; j++) d.push((at(p, j) + at(q, j)) / 2);
+      if (names[k] === 'normal' && n === 3) {
+        const l = Math.hypot(d[o], d[o + 1], d[o + 2]) || 1;
+        for (let j = 0; j < 3; j++) d[o + j] /= l;
+      }
+    }
+    addedW.push((X(p) + X(q)) / 2, (Y(p) + Y(q)) / 2, (Z(p) + Z(q)) / 2);
+    return v;
+  };
+  // Triangles found not to need splitting aren't asked again while no neighbour's split reaches them; each triangle's
+  // longest edge is kept alongside. A split triangle's first child takes its place, the others go at the end
+  const longestOf = (a, b, c) => Math.max(len(a, b), len(b, c), len(c, a));
+  const settled = [];
+  const longests = [];
+  for (let t = 0; t < active.length; t += 3) {
+    settled.push(0);
+    longests.push(longestOf(active[t], active[t + 1], active[t + 2]));
+  }
+  const put = (slot, a, b, c) => {
+    if (slot < 0) {
+      active.push(a, b, c);
+      settled.push(0);
+      longests.push(longestOf(a, b, c));
+    } else {
+      active[3 * slot] = a;
+      active[3 * slot + 1] = b;
+      active[3 * slot + 2] = c;
+      settled[slot] = 0;
+      longests[slot] = longestOf(a, b, c);
+    }
+  };
+  for (;;) {
+    const marked = new Set();
+    let shortest = Infinity; // of the edges to split: no shorter edge is one of them
+    const n0 = settled.length;
+    for (let i = 0; i < n0; i++) {
+      if (settled[i]) continue;
+      const a = active[3 * i];
+      const b = active[3 * i + 1];
+      const c = active[3 * i + 2];
+      const longest = longests[i];
+      if (!needsSplit(X(a), Z(a), X(b), Z(b), X(c), Z(c), longest)) {
+        settled[i] = 1;
+        continue;
+      }
+      const lab = len(a, b);
+      const lbc = len(b, c);
+      marked.add(longest === lab ? edgeKey(a, b) : longest === lbc ? edgeKey(b, c) : edgeKey(c, a));
+      shortest = Math.min(shortest, longest);
+    }
+    if (!marked.size) break;
+    const reach = shortest - 1e-3;
+    const isMarked = (p, q) => len(p, q) >= reach && marked.has(edgeKey(p, q));
+    for (let i = 0; i < n0; i++) {
+      if (longests[i] < reach) continue;
+      let [a, b, c] = [active[3 * i], active[3 * i + 1], active[3 * i + 2]];
+      let m = [isMarked(a, b), isMarked(b, c), isMarked(c, a)];
+      const n = m[0] + m[1] + m[2];
+      if (n === 0) continue;
+      // Turned so the split edges come first: ab (one), ab and bc (two)
+      if ((n === 1 && m[1]) || (n === 2 && !m[0])) [a, b, c, m] = [b, c, a, [m[1], m[2], m[0]]];
+      else if ((n === 1 && m[2]) || (n === 2 && !m[1])) [a, b, c, m] = [c, a, b, [m[2], m[0], m[1]]];
+      if (n === 1) {
+        const ab = mid(a, b);
+        put(i, a, ab, c);
+        put(-1, ab, b, c);
+      } else if (n === 2) {
+        const ab = mid(a, b);
+        const bc = mid(b, c);
+        put(i, ab, b, bc);
+        put(-1, a, ab, bc);
+        put(-1, a, bc, c);
+      } else {
+        const ab = mid(a, b);
+        const bc = mid(b, c);
+        const ca = mid(c, a);
+        put(i, a, ab, ca);
+        put(-1, ab, b, bc);
+        put(-1, ca, bc, c);
+        put(-1, ab, bc, ca);
+      }
+    }
+  }
+  if (!addedW.length) return null;
+  const vertices = count + addedW.length / 3;
+  const attrs = {};
+  names.forEach((name, k) => {
+    const a = new Float32Array(vertices * sizes[k]);
+    a.set(own[k]);
+    a.set(added[k], own[k].length);
+    attrs[name] = a;
+  });
+  const index = new Uint32Array(kept.length + active.length);
+  index.set(kept);
+  index.set(active, kept.length);
+  return { attrs, index, vertices, triangles: index.length / 3 };
+}
+
+// The ground layers' meshes (above), each holding its flat geometry in userData.flatGeometry, the instanced slabs
+// among them baked into plain meshes: when the guest is built, before the culling set-up and the materials' pass
+function groundLayers(scene) {
+  scene.updateMatrixWorld(true);
+  const found = [];
+  for (const name of [...DRAPE_ROOTS, ...DRAPE_SLAB_ROOTS]) {
+    const root = scene.getObjectByName(name);
+    const slabsOnly = DRAPE_SLAB_ROOTS.includes(name);
+    if (root) root.traverse((o) => {
+      if (!o.isMesh || o.isSkinnedMesh || o.name === 'HarborWater' || Array.isArray(o.material)) return;
+      if (!slabsOnly || o.isInstancedMesh) found.push(o);
+    });
+  }
+  const layers = [];
+  const v = new THREE.Vector3();
+  const m = new THREE.Matrix4();
+  for (let o of found) {
+    const geo = o.geometry;
+    if (!geo || !geo.attributes.position || Object.keys(geo.morphAttributes).length) continue;
+    const named = Object.entries(geo.attributes);
+    if (named.some(([, a]) => a.isInterleavedBufferAttribute || !(a.array instanceof Float32Array))) continue;
+    if (o.isInstancedMesh) {
+      // Baked when every instance lies in the band (slabs, not posts) and some reach past a ground cell
+      if (o.instanceColor || o.count * geo.attributes.position.count > 2e5) continue;
+      let inBand = true;
+      let reach = 0;
+      const box = geo.boundingBox || (geo.computeBoundingBox(), geo.boundingBox);
+      for (let k = 0; k < o.count && inBand; k++) {
+        o.getMatrixAt(k, m).premultiply(o.matrixWorld);
+        for (const [x, y, z] of [[box.min.x, box.min.y, box.min.z], [box.max.x, box.max.y, box.max.z]]) {
+          v.set(x, y, z).applyMatrix4(m);
+          inBand = inBand && v.y >= DRAPE_BAND[0] && v.y <= DRAPE_BAND[1];
+        }
+        reach = Math.max(reach, v.set(box.max.x - box.min.x, 0, box.max.z - box.min.z).applyMatrix3(new THREE.Matrix3().setFromMatrix4(m)).length());
+      }
+      if (!inBand || reach < 40) continue;
+      o = bakeInstances(o);
+    } else if (geo.groups.length) {
+      // One material: its groups (an extrusion's caps and sides) say nothing
+      o.geometry = geo.clone();
+      o.geometry.clearGroups();
+    }
+    o.userData.flatGeometry = o.geometry;
+    layers.push(o);
+  }
+  return layers;
+}
+
+// An instanced mesh as one plain mesh in its place, its instances' matrices baked into the vertices
+function bakeInstances(o) {
+  const geo = o.geometry.index ? o.geometry.toNonIndexed() : o.geometry;
+  const m = new THREE.Matrix4();
+  const parts = [];
+  for (let k = 0; k < o.count; k++) {
+    o.getMatrixAt(k, m);
+    parts.push(geo.clone().applyMatrix4(m));
+  }
+  const merged = window.NYC.Addons.mergeGeometries(parts, false);
+  const baked = new THREE.Mesh(merged, o.material);
+  for (const k of ['name', 'castShadow', 'receiveShadow', 'renderOrder', 'frustumCulled', 'visible']) baked[k] = o[k];
+  baked.layers.mask = o.layers.mask;
+  baked.position.copy(o.position);
+  baked.quaternion.copy(o.quaternion);
+  baked.scale.copy(o.scale);
+  const parent = o.parent;
+  parent.add(baked);
+  parent.remove(o);
+  baked.updateMatrixWorld();
+  return baked;
+}
+
+// Splits the ground layers for the ground set (above), each from its flat geometry. Returns the vertices and triangles
+// of the layers before and after
+function drapeGroundLayers(layers, ground) {
+  const cap = DRAPE_MAX_CELLS * Math.max(ground.grid.dx, ground.grid.dz);
+  const off = (x, z) => ground.offsetAt(x, z);
+  const needsSplit = (ax, az, bx, bz, cx, cz, longest) => {
+    if (longest <= DRAPE_MIN_EDGE) return false;
+    if (longest > cap) return true;
+    const la = off(ax, az);
+    const lb = off(bx, bz);
+    const lc = off(cx, cz);
+    for (const [u, v] of DRAPE_PROBES) {
+      const t = 1 - u - v;
+      if (Math.abs(la * t + lb * u + lc * v - off(ax * t + bx * u + cx * v, az * t + bz * u + cz * v)) > DRAPE_TOLERANCE) return true;
+    }
+    return false;
+  };
+  const stats = { layers: layers.length, split: 0, vertices: [0, 0], triangles: [0, 0], ms: 0 };
+  const t0 = performance.now();
+  const v = new THREE.Vector3();
+  for (const o of layers) {
+    const flat = o.userData.flatGeometry;
+    const pos = flat.attributes.position;
+    const attrs = {};
+    for (const [n, a] of Object.entries(flat.attributes)) attrs[n] = { array: a.array, itemSize: a.itemSize };
+    const world = new Float32Array(pos.count * 3);
+    o.updateWorldMatrix(true, false);
+    for (let i = 0; i < pos.count; i++) v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld).toArray(world, 3 * i);
+    const out = subdivideTriangles({ attrs, index: flat.index && flat.index.array, world }, needsSplit);
+    const triangles = (flat.index ? flat.index.count : pos.count) / 3;
+    stats.vertices[0] += pos.count;
+    stats.triangles[0] += triangles;
+    let geo = flat;
+    if (out) {
+      geo = new THREE.BufferGeometry();
+      for (const [n, a] of Object.entries(flat.attributes)) geo.setAttribute(n, new THREE.BufferAttribute(out.attrs[n], a.itemSize, a.normalized));
+      geo.setIndex(new THREE.BufferAttribute(out.index, 1));
+      stats.split++;
+    }
+    stats.vertices[1] += out ? out.vertices : pos.count;
+    stats.triangles[1] += out ? out.triangles : triangles;
+    if (o.geometry !== flat && o.geometry !== geo) o.geometry.dispose();
+    o.geometry = geo;
+  }
+  stats.ms = Math.round(performance.now() - t0);
+  return stats;
+}
+
 // The ground's nodes, made once per page (TSL is only there in a browser) and shared by its guests: a vertex's lift is a
 // function of where it stands, the same for every guest of the same host. NYC.groundLift, the lift as a varying, is
 // what NYC.deckPosition (tsl-materials.js) takes off positionWorld to keep the shading's storeys on the road deck.
@@ -284,7 +586,8 @@ function guestOptions(options = {}) {
     clearAlpha: options.clearAlpha ?? 0,
     pixelRatio: options.pixelRatio || 1,
     composite: options.composite === true,
-    logDepth: options.logDepth === true
+    logDepth: options.logDepth === true,
+    lights: options.lights !== false
   };
 }
 
@@ -298,13 +601,20 @@ function setCompositeOutput(renderer) {
 // Each node material in the scene, once: the ground's lift (lift(material), for those that don't place their own
 // vertices), the output encoding (output(outputNode) → outputNode) and the depth (setupDepth, the material's method).
 // A material's program then differs from one with the same nodes without these, so its cache key says which it has.
-// Returns how many materials it saw
+// Every material also loses its own MRT outputs (mrtNode: tsl-materials.js _transparentEffectMRT and the like, the
+// normal and metalRough the app's SSR pass reads). The guest draws with no MRT, and drawn into a render target (the
+// renderer's sRGB output buffer) with none, a material's mrtNode replaces its colour output instead of joining it
+// (NodeMaterial.setupOutput), leaving its fragment shader no output for the colour buffer: WebGL2 rejects the draw
+// (GL_INVALID_OPERATION, "Active draw buffers with missing fragment shader outputs"), and the lane paint, the
+// highways' markings, the park lamps' pools, the steam, the god rays, the cars' contact shadows, headlight beams and
+// flares and the tunnels' shade went undrawn. Returns how many materials it saw
 function prepareMaterials(scene, { lift = null, output = null, setupDepth = null } = {}) {
   const seen = new Set();
   scene.traverse((o) => {
     for (const m of [].concat(o.material || [])) {
       if (!m || !m.isNodeMaterial || seen.has(m)) continue;
       seen.add(m);
+      if (m.mrtNode) m.mrtNode = null;
       const tags = [];
       if (lift && !m.vertexNode) {
         lift(m);
@@ -399,6 +709,8 @@ function liftBounds(box, ground, pad = 10) {
 //   composite         for a host that draws the guest into its own framebuffer (default false): no clears, no output
 //                     render target, no tone mapping, each material encoding sRGB (THE HOST'S FRAME)
 //   logDepth          write the host's logarithmic depth, from setDepth() (default false; THE HOST'S FRAME)
+//   lights            the street, store and car lamps, clustered (default true). false leaves them out, and with them
+//                     ClusteredLighting's work each frame (on WebGL2 a transform-feedback pass over every cluster)
 // =====================================================================================================================
 async function createGuest(options = {}) {
   const canvas = options.canvas;
@@ -419,7 +731,7 @@ async function createGuest(options = {}) {
   renderer.setClearColor(0x000000, opts.clearAlpha);
   renderer.shadowMap.enabled = opts.shadows;
   if (opts.composite) setCompositeOutput(renderer);
-  if (ClusteredLighting) renderer.lighting = new ClusteredLighting(256, 32, 28, 48);
+  if (ClusteredLighting && opts.lights) renderer.lighting = new ClusteredLighting(256, 32, 28, 48);
   await renderer.init();
 
   // The ground's nodes go in before the city is built: its materials' storeys and kerbs read NYC.groundLift
@@ -451,6 +763,14 @@ async function createGuest(options = {}) {
     if (o.name === 'PeopleNear' || o.name === 'PeopleFar') crowdMeshes.push(o);
   });
   for (const mesh of crowdMeshes) mesh.removeFromParent();
+  // lights: false leaves out the lamps (point and spot lights): unclustered, every material would shade all of them
+  if (!opts.lights) {
+    const lamps = [];
+    scene.traverse((o) => {
+      if (o.isPointLight || o.isSpotLight) lamps.push(o);
+    });
+    for (const lamp of lamps) lamp.removeFromParent();
+  }
 
   // Left out before the culling set-up below, which would otherwise chunk their props and give their buildings shadow
   // stand-ins (at the scene's top level, drawn whatever their group's visibility)
@@ -460,6 +780,10 @@ async function createGuest(options = {}) {
       if (o) o.removeFromParent();
     }
   }
+
+  // The ground layers, split for the ground in setGround() (THE GROUND, drapeGroundLayers), their instanced slabs baked
+  // before the culling set-up
+  const layers = groundLayers(scene);
 
   const cullingRoots = ['ManhattanCityGrid', 'ManhattanCityBlocks', 'ManhattanStreetDetails', 'ManhattanLandmarks', 'Boroughs']
     .map((name) => scene.getObjectByName(name))
@@ -541,6 +865,7 @@ async function createGuest(options = {}) {
     groundNodes.on.value = 1;
     groundNodes.curvature.value = ground.curvature;
     frame.height0 = ground.height0;
+    scene.userData.groundDrape = drapeGroundLayers(layers, ground);
     padBounds();
   }
 
@@ -684,5 +1009,5 @@ function makeOffsetMap(values, cols, rows) {
   return map;
 }
 
-Object.assign(window.NYC, { createGuest, makeGeoFrame, makeGround, guestOptions, prepareMaterials, applyView, liftBounds });
+Object.assign(window.NYC, { createGuest, makeGeoFrame, makeGround, guestOptions, prepareMaterials, applyView, liftBounds, subdivideTriangles });
 })();
