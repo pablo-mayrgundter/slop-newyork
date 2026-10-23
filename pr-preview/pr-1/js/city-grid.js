@@ -2917,6 +2917,11 @@ function buildManhattanWaterfrontEdge(group, { blockSidewalks, parkTreeSites, la
     g.setAttribute('position', new THREE.Float32BufferAttribute(A.pos, 3));
     g.setAttribute('normal', new THREE.Float32BufferAttribute(A.nor, 3));
     g.setAttribute('uv', new THREE.Float32BufferAttribute(A.uv, 2));
+    // The accumulator's plain arrays (8 bytes a number) are copied: let them go. This scope outlives the build (the
+    // materials' node functions close over it), and with it they held ~100 MB
+    A.pos = [];
+    A.nor = [];
+    A.uv = [];
     const m = new THREE.Mesh(g, mat);
     m.castShadow = cast;
     m.receiveShadow = true;
@@ -2944,6 +2949,7 @@ function buildManhattanWaterfrontEdge(group, { blockSidewalks, parkTreeSites, la
     g.setAttribute('side', new THREE.Float32BufferAttribute(paint.side, 2));
     g.setAttribute('paint', new THREE.Float32BufferAttribute(paint.paint, 3));
     g.setIndex(paint.idx);
+    for (const k of Object.keys(paint)) paint[k] = []; // copied (as the accumulators, above)
     const m = new THREE.Mesh(g, createRoadPaintMaterial());
     m.name = 'ShoreHighwayMarkings';
     m.receiveShadow = true;
@@ -3362,6 +3368,9 @@ function buildSouthStreetViaduct(group, opts) {
     g.setAttribute('position', new THREE.Float32BufferAttribute(A.pos, 3));
     g.setAttribute('normal', new THREE.Float32BufferAttribute(A.nor, 3));
     g.setAttribute('uv', new THREE.Float32BufferAttribute(A.uv, 2));
+    A.pos = []; // copied: let the plain arrays go (buildManhattanWaterfrontEdge's addMesh)
+    A.nor = [];
+    A.uv = [];
     const m = new THREE.Mesh(g, mat);
     m.name = name;
     m.castShadow = cast;

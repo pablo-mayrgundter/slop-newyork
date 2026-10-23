@@ -239,13 +239,20 @@ function fillHoles(h, cols, rows) {
 // the faces looking down. The instanced slabs among them (the rectangular sidewalks and their curbs, up to ~500 m long,
 // the blocks' back yards) are baked into one mesh each when the guest is built. Each setGround() splits the layers again from their flat
 // geometry. The shadow stand-ins (scene-culling.js) are copies of the flat geometry: a curb's shadow on a hill can
-// stray by the curb's lift error
+// stray by the curb's lift error.
+// That detail is for a ground with a few smooth hills (the demo's). Real terrain bends a little everywhere: sampled
+// from Terrarium on a 100 m grid, the 4 mm tolerance split every layer down to a few metres across the whole island,
+// for minutes and gigabytes (the page hung). A host that sees the city from afar (a globe) passes setGround a coarser
+// drape ({ tolerance, minEdge, maxCells, maxTriangles }: DRAPE_DEFAULTS' fields), and maxTriangles bounds it whatever
+// the ground: each layer splits within its share of it (by area), a pass at a time, so it stays watertight
 const DRAPE_ROOTS = ['ManhattanCityGrid', 'RoadMarkings'];
 const DRAPE_SLAB_ROOTS = ['ManhattanCityBlocks']; // only their instanced slabs (the back yards), not the buildings
 const DRAPE_BAND = [-3, 3.5];
 const DRAPE_TOLERANCE = 0.004;
 const DRAPE_MIN_EDGE = 2;
 const DRAPE_MAX_CELLS = 4;
+const SLIVER_HEIGHT = 1e-3; // a triangle narrower than this across its longest edge (m) is a sliver (subdivideTriangles)
+const DRAPE_DEFAULTS = { tolerance: DRAPE_TOLERANCE, minEdge: DRAPE_MIN_EDGE, maxCells: DRAPE_MAX_CELLS, maxTriangles: Infinity };
 // Where in a triangle the ground is checked: barycentric (u, v) for the second and third corners
 const DRAPE_PROBES = [[1 / 3, 1 / 3], [0.5, 0], [0, 0.5], [0.5, 0.5], [2 / 3, 1 / 6], [1 / 6, 2 / 3], [1 / 6, 1 / 6]];
 
@@ -254,9 +261,10 @@ const DRAPE_PROBES = [[1 / 3, 1 / 3], [0.5, 0], [0, 0.5], [0.5, 0.5], [2 / 3, 1 
 // triangle that has it, so the mesh stays watertight. needsSplit may be a number: split while the longest edge is
 // longer. mesh: { attrs: { name: { array, itemSize } } per vertex, index (or null), world (x, y, z per vertex) }. A
 // triangle takes part when its corners' world y are within band and it doesn't face down. Every attribute is
-// interpolated linearly ('normal' renormalised). Returns null when nothing was split, else { attrs: { name:
-// Float32Array }, index: Uint32Array, vertices, triangles }
-function subdivideTriangles(mesh, needsSplit, band = DRAPE_BAND) {
+// interpolated linearly ('normal' renormalised). It stops before a pass that could take the mesh past maxTriangles (a
+// split edge adds at most two triangles). Returns null when nothing was split, else { attrs: { name: Float32Array },
+// index: Uint32Array, vertices, triangles, capped }
+function subdivideTriangles(mesh, needsSplit, band = DRAPE_BAND, maxTriangles = Infinity) {
   if (typeof needsSplit === 'number') {
     const maxEdge = needsSplit;
     needsSplit = (ax, az, bx, bz, cx, cz, longest) => longest > maxEdge;
@@ -325,6 +333,7 @@ function subdivideTriangles(mesh, needsSplit, band = DRAPE_BAND) {
   const longestOf = (a, b, c) => Math.max(len(a, b), len(b, c), len(c, a));
   const settled = [];
   const longests = [];
+  let capped = false;
   for (let t = 0; t < active.length; t += 3) {
     settled.push(0);
     longests.push(longestOf(active[t], active[t + 1], active[t + 2]));
@@ -352,7 +361,18 @@ function subdivideTriangles(mesh, needsSplit, band = DRAPE_BAND) {
       const b = active[3 * i + 1];
       const c = active[3 * i + 2];
       const longest = longests[i];
-      if (!needsSplit(X(a), Z(a), X(b), Z(b), X(c), Z(c), longest)) {
+      // A sliver (its corners in a line, as the deck's triangulation leaves along straight shores) covers nothing, so
+      // it never asks for a split: it splits only along with its neighbours' edges. Split for itself, it never settled
+      // on real terrain (its halves were slivers on the same line, whose edges' midpoints, their keys, coincided), and
+      // the splitting went on for ever. A wall isn't one: its corners are in a line across x, z, but not in space
+      const ux = X(b) - X(a);
+      const uy = Y(b) - Y(a);
+      const uz = Z(b) - Z(a);
+      const vx = X(c) - X(a);
+      const vy = Y(c) - Y(a);
+      const vz = Z(c) - Z(a);
+      const twiceArea = Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
+      if (twiceArea < SLIVER_HEIGHT * longest || !needsSplit(X(a), Z(a), X(b), Z(b), X(c), Z(c), longest)) {
         settled[i] = 1;
         continue;
       }
@@ -362,6 +382,10 @@ function subdivideTriangles(mesh, needsSplit, band = DRAPE_BAND) {
       shortest = Math.min(shortest, longest);
     }
     if (!marked.size) break;
+    if (kept.length / 3 + settled.length + 2 * marked.size > maxTriangles) {
+      capped = true;
+      break;
+    }
     const reach = shortest - 1e-3;
     const isMarked = (p, q) => len(p, q) >= reach && marked.has(edgeKey(p, q));
     for (let i = 0; i < n0; i++) {
@@ -406,7 +430,7 @@ function subdivideTriangles(mesh, needsSplit, band = DRAPE_BAND) {
   const index = new Uint32Array(kept.length + active.length);
   index.set(kept);
   index.set(active, kept.length);
-  return { attrs, index, vertices, triangles: index.length / 3 };
+  return { attrs, index, vertices, triangles: index.length / 3, capped };
 }
 
 // The ground layers' meshes (above), each holding its flat geometry in userData.flatGeometry, the instanced slabs
@@ -480,36 +504,59 @@ function bakeInstances(o) {
   return baked;
 }
 
-// Splits the ground layers for the ground set (above), each from its flat geometry. Returns the vertices and triangles
-// of the layers before and after
-function drapeGroundLayers(layers, ground) {
-  const cap = DRAPE_MAX_CELLS * Math.max(ground.grid.dx, ground.grid.dz);
+// Splits the ground layers for the ground set (above), each from its flat geometry, to the drape's detail (options:
+// DRAPE_DEFAULTS' fields). Returns the vertices and triangles of the layers before and after
+function drapeGroundLayers(layers, ground, options = {}) {
+  const { tolerance, minEdge, maxCells, maxTriangles } = { ...DRAPE_DEFAULTS, ...options };
+  const cap = maxCells * Math.max(ground.grid.dx, ground.grid.dz);
   const off = (x, z) => ground.offsetAt(x, z);
   const needsSplit = (ax, az, bx, bz, cx, cz, longest) => {
-    if (longest <= DRAPE_MIN_EDGE) return false;
+    if (longest <= minEdge) return false;
     if (longest > cap) return true;
     const la = off(ax, az);
     const lb = off(bx, bz);
     const lc = off(cx, cz);
     for (const [u, v] of DRAPE_PROBES) {
       const t = 1 - u - v;
-      if (Math.abs(la * t + lb * u + lc * v - off(ax * t + bx * u + cx * v, az * t + bz * u + cz * v)) > DRAPE_TOLERANCE) return true;
+      if (Math.abs(la * t + lb * u + lc * v - off(ax * t + bx * u + cx * v, az * t + bz * u + cz * v)) > tolerance) return true;
     }
     return false;
   };
-  const stats = { layers: layers.length, split: 0, vertices: [0, 0], triangles: [0, 0], ms: 0 };
+  const stats = { layers: layers.length, split: 0, capped: 0, vertices: [0, 0], triangles: [0, 0], ms: 0 };
   const t0 = performance.now();
   const v = new THREE.Vector3();
-  for (const o of layers) {
+  // Each layer's world positions, and its area across x, z (for its share of maxTriangles)
+  const worlds = layers.map((o) => {
+    const pos = o.userData.flatGeometry.attributes.position;
+    const world = new Float32Array(pos.count * 3);
+    o.updateWorldMatrix(true, false);
+    for (let i = 0; i < pos.count; i++) v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld).toArray(world, 3 * i);
+    return world;
+  });
+  const areas = layers.map((o, k) => {
+    if (!Number.isFinite(maxTriangles)) return 0;
+    const flat = o.userData.flatGeometry;
+    const w = worlds[k];
+    const index = flat.index && flat.index.array;
+    const n = index ? index.length : w.length / 3;
+    let area = 0;
+    for (let t = 0; t < n; t += 3) {
+      const a = 3 * (index ? index[t] : t);
+      const b = 3 * (index ? index[t + 1] : t + 1);
+      const c = 3 * (index ? index[t + 2] : t + 2);
+      area += Math.abs((w[b] - w[a]) * (w[c + 2] - w[a + 2]) - (w[c] - w[a]) * (w[b + 2] - w[a + 2])) / 2;
+    }
+    return area;
+  });
+  const totalArea = areas.reduce((sum, a) => sum + a, 0) || 1;
+  layers.forEach((o, k) => {
     const flat = o.userData.flatGeometry;
     const pos = flat.attributes.position;
     const attrs = {};
     for (const [n, a] of Object.entries(flat.attributes)) attrs[n] = { array: a.array, itemSize: a.itemSize };
-    const world = new Float32Array(pos.count * 3);
-    o.updateWorldMatrix(true, false);
-    for (let i = 0; i < pos.count; i++) v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld).toArray(world, 3 * i);
-    const out = subdivideTriangles({ attrs, index: flat.index && flat.index.array, world }, needsSplit);
     const triangles = (flat.index ? flat.index.count : pos.count) / 3;
+    const budget = Number.isFinite(maxTriangles) ? Math.max(triangles, Math.floor((maxTriangles * areas[k]) / totalArea)) : Infinity;
+    const out = subdivideTriangles({ attrs, index: flat.index && flat.index.array, world: worlds[k] }, needsSplit, DRAPE_BAND, budget);
     stats.vertices[0] += pos.count;
     stats.triangles[0] += triangles;
     let geo = flat;
@@ -518,12 +565,13 @@ function drapeGroundLayers(layers, ground) {
       for (const [n, a] of Object.entries(flat.attributes)) geo.setAttribute(n, new THREE.BufferAttribute(out.attrs[n], a.itemSize, a.normalized));
       geo.setIndex(new THREE.BufferAttribute(out.index, 1));
       stats.split++;
+      if (out.capped) stats.capped++;
     }
     stats.vertices[1] += out ? out.vertices : pos.count;
     stats.triangles[1] += out ? out.triangles : triangles;
     if (o.geometry !== flat && o.geometry !== geo) o.geometry.dispose();
     o.geometry = geo;
-  }
+  });
   stats.ms = Math.round(performance.now() - t0);
   return stats;
 }
@@ -587,7 +635,9 @@ function guestOptions(options = {}) {
     pixelRatio: options.pixelRatio || 1,
     composite: options.composite === true,
     logDepth: options.logDepth === true,
-    lights: options.lights !== false
+    lights: options.lights !== false,
+    crowds: options.crowds !== false,
+    drape: options.drape || null
   };
 }
 
@@ -711,6 +761,13 @@ function liftBounds(box, ground, pad = 10) {
 //   logDepth          write the host's logarithmic depth, from setDepth() (default false; THE HOST'S FRAME)
 //   lights            the street, store and car lamps, clustered (default true). false leaves them out, and with them
 //                     ClusteredLighting's work each frame (on WebGL2 a transform-feedback pass over every cluster)
+//   drape             how finely the ground layers follow the host's ground (THE GROUND, DRAPE_DEFAULTS: { tolerance,
+//                     minEdge, maxCells, maxTriangles }; default the street-level detail, unbounded). setGround's
+//                     options.drape overrides it for that ground
+//   crowds            the pedestrians (default true). They are never drawn on WebGL2 (below); false doesn't build them,
+//                     so they don't walk either: no rigs, no skinning each frame, and no one on the crosswalks
+// What a guest leaves out is not built: extent 'manhattan' builds no other boroughs (their ~117k buildings, bridges and
+// islands), and shadows false no shadow stand-ins (scene-culling.js). guest.stats.build has each step's milliseconds.
 // =====================================================================================================================
 async function createGuest(options = {}) {
   const canvas = options.canvas;
@@ -739,23 +796,32 @@ async function createGuest(options = {}) {
   const ground = makeGround(frame);
   const groundNodes = getGroundNodes(ground.tangent);
 
+  // The city, built as main.js builds it, less what the options leave out. Each step's time goes in stats.build
+  const stats = { build: {} };
+  const step = (name, build) => {
+    const t0 = performance.now();
+    const out = build();
+    stats.build[name] = Math.round(performance.now() - t0);
+    return out;
+  };
   const scene = new THREE.Scene();
-  const lighting = new LightingSystem(scene, renderer, { sky: false, fog: false });
+  const lighting = step('lighting', () => new LightingSystem(scene, renderer, { sky: false, fog: false }));
 
-  // The city, built as main.js builds it
-  const cityGrid = buildCityGrid(scene);
-  const boroughs = buildBoroughs(scene, { sidewalks: cityGrid.sidewalks });
-  const { colliders: landmarkColliders } = buildLandmarks(scene);
-  const cityBlocks = buildCityBlocks(scene);
-  const allColliders = [...landmarkColliders, ...cityBlocks.colliders, ...boroughs.colliders, ...(cityGrid.colliders || [])];
-  const streetDetails = buildStreetDetails(scene);
-  const trafficSystem = createTrafficSystem(scene, cityGrid.sidewalks, [
+  const cityGrid = step('cityGrid', () => buildCityGrid(scene));
+  // extent 'manhattan' draws none of the boroughs: not built, rather than built and removed (their buildings, bridges
+  // and islands are most of buildBoroughs' time, and its tram's update would keep them all in memory)
+  const boroughs = opts.extent === 'all' ? step('boroughs', () => buildBoroughs(scene, { sidewalks: cityGrid.sidewalks })) : null;
+  const { colliders: landmarkColliders } = step('landmarks', () => buildLandmarks(scene));
+  const cityBlocks = step('cityBlocks', () => buildCityBlocks(scene));
+  const allColliders = [...landmarkColliders, ...cityBlocks.colliders, ...(boroughs ? boroughs.colliders : []), ...(cityGrid.colliders || [])];
+  const streetDetails = step('streetDetails', () => buildStreetDetails(scene));
+  const trafficSystem = step('traffic', () => createTrafficSystem(scene, cityGrid.sidewalks, [
     ...cityGrid.footprints,
     ...streetDetails.footprints,
     ...allColliders.filter((c) => !c.obb)
-  ]);
-  const highwayTraffic = createHighwayTraffic(scene, cityGrid.highwayLanes);
-  buildRoadPaint(scene, trafficSystem.network);
+  ], { pedestrians: opts.crowds }));
+  const highwayTraffic = step('highwayTraffic', () => createHighwayTraffic(scene, cityGrid.highwayLanes));
+  step('roadPaint', () => buildRoadPaint(scene, trafficSystem.network));
   // The crowds skin each person from a storage buffer read by index, which the WebGL2 backend can't do (it smears them
   // into a sheet): the pedestrians still walk and keep traffic waiting, undrawn
   const crowdMeshes = [];
@@ -783,12 +849,13 @@ async function createGuest(options = {}) {
 
   // The ground layers, split for the ground in setGround() (THE GROUND, drapeGroundLayers), their instanced slabs baked
   // before the culling set-up
-  const layers = groundLayers(scene);
+  const layers = step('groundLayers', () => groundLayers(scene));
 
   const cullingRoots = ['ManhattanCityGrid', 'ManhattanCityBlocks', 'ManhattanStreetDetails', 'ManhattanLandmarks', 'Boroughs']
     .map((name) => scene.getObjectByName(name))
     .filter(Boolean);
-  setupSceneCulling(scene, cullingRoots, lighting.sunLight.shadow);
+  // The shadow stand-ins only the cascades draw: none without shadows
+  step('culling', () => setupSceneCulling(scene, cullingRoots, opts.shadows ? lighting.sunLight.shadow : null));
   // Unlike main.js, instance matrices stay instanced vertex attributes: its swap to storage attributes spares WebGPU's
   // uniform buffers, and on the WebGL2 backend instance matrices are vertex attributes already
 
@@ -852,8 +919,8 @@ async function createGuest(options = {}) {
   }
 
   // The host's terrain heights at groundSamples()' points (m above its ellipsoid), and options.seaLevel, its mean sea
-  // level there (makeGround set()). After it, frame.height0 is where the host puts the world frame's origin, and the
-  // city stands on the host's ground
+  // level there (makeGround set()), and options.drape, the layers' detail (THE GROUND; default the guest's drape). After
+  // it, frame.height0 is where the host puts the world frame's origin, and the city stands on the host's ground
   function setGround(heights, options) {
     ground.set(heights, options);
     const { x0, z0, dx, dz, cols, rows } = ground.grid;
@@ -865,7 +932,7 @@ async function createGuest(options = {}) {
     groundNodes.on.value = 1;
     groundNodes.curvature.value = ground.curvature;
     frame.height0 = ground.height0;
-    scene.userData.groundDrape = drapeGroundLayers(layers, ground);
+    scene.userData.groundDrape = stats.drape = drapeGroundLayers(layers, ground, (options && options.drape) || opts.drape || {});
     padBounds();
   }
 
@@ -930,7 +997,7 @@ async function createGuest(options = {}) {
     streetDetails.signalClock.value = elapsed;
     trafficSystem.update(dt, elapsed, pos, null, 'car', simCamera);
     highwayTraffic.update(dt, simCamera, null, 'car');
-    if (boroughs.update) boroughs.update(elapsed);
+    if (boroughs && boroughs.update) boroughs.update(elapsed);
     cityBlocks.update(pos.x, pos.z);
     if (cityBlocks.updateLights) cityBlocks.updateLights(simCamera);
     if (streetDetails.update) streetDetails.update(simCamera);
@@ -959,6 +1026,7 @@ async function createGuest(options = {}) {
   // Compile every material's pipelines now rather than on the frames that first meet them (frustum culling off, as
   // main.js's warm-up frame)
   async function compile() {
+    const t0 = performance.now();
     const culled = [];
     scene.traverse((o) => {
       if (o.frustumCulled) {
@@ -970,6 +1038,7 @@ async function createGuest(options = {}) {
       await renderer.compileAsync(scene, camera);
     } finally {
       for (const o of culled) o.frustumCulled = true;
+      stats.build.compile = Math.round(performance.now() - t0);
     }
   }
 
@@ -979,6 +1048,7 @@ async function createGuest(options = {}) {
     camera,
     lighting,
     trafficSystem,
+    stats,
     frame,
     groundSamples,
     setGround,
