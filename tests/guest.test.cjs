@@ -30,7 +30,7 @@ class Matrix4 {
 function loadFrame() {
   // boroughs.js's lon/lat → world map, as it stands there
   const LL = read('js/boroughs.js').match(/function LL\(lon, lat\) \{[^]*?\n\}/)[0];
-  const window = { NYC: { THREE: { Matrix4 }, Addons: {} } };
+  const window = { NYC: { THREE: { Matrix4 }, TSL: {}, Addons: {} } };
   const context = vm.createContext({ window, Math });
   vm.runInContext(`${LL}; window.NYC.lonLatToWorld = LL;`, context);
   vm.runInContext(read('js/guest.js'), context);
