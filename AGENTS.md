@@ -48,7 +48,7 @@ code.
   `python3 -m http.server 8000`) and open `/`.
   - A new script goes into `nycAppScripts` at the point where what it
     reads from `window.NYC` is already defined.
-- **Tests:** `node --test tests/*.cjs tests/*.mjs` (114 tests, about
+- **Tests:** `node --test tests/*.cjs tests/*.mjs` (115 tests, about
   40 s). Plain `node --test tests/` fails, so use the globs. The tests
   run the scripts in `node:vm` with stubs for `window.NYC`, three.js
   and the DOM, or parse index.html and the scripts as text. No GPU and
@@ -67,7 +67,19 @@ code.
   - The guest always runs on three's WebGL2 backend
     (`forceWebGL: true`), because NetGL records WebGL2.
   - guest.html takes `?shadows=0` and `?extent=all` (the default,
-    `manhattan`, leaves out the other boroughs and the harbour's water).
+    `manhattan`, leaves out the other boroughs and the harbour's water),
+    `?lights=0` (no lamps, no ClusteredLighting), `?ground=demo`,
+    `?view=aerial|street|park` and `?dpr=1`, and reads out fps, the frame
+    time and the JS time in `update()` and `render()`. The app takes
+    `?webgl` to force the WebGL2 backend in a browser with WebGPU.
+  - A material's own `mrtNode` replaces its colour output when it draws
+    into a render target with no MRT, and WebGL2 then rejects the draw
+    ("Active draw buffers with missing fragment shader outputs"). The
+    guest has no MRT, so `prepareMaterials` drops every `mrtNode`.
+  - The ground's lift moves vertices only, so `setGround()` splits the
+    flat ground layers where the ground bends (THE GROUND,
+    `drapeGroundLayers`). A new big flat layer at the street goes under
+    `ManhattanCityGrid` or into `DRAPE_ROOTS`, or it cuts through hills.
   - A host that draws the guest into its own framebuffer (Cesium's
     `scene.externalRenderers`, js/guest-cesium.mjs
     `cesiumExternalRenderer`) needs `composite: true` and, under log
@@ -148,6 +160,19 @@ code.
   - The app is ready when `window.__NYC_APP.ready` is true. The guest
     page exposes the guest as `window.__NYC_GUEST`. Read state with
     `page.evaluate` rather than inferring it from pixels.
+  - three's own rAF loop (its `Animation`) advances the node frame and
+    resets `renderer.info`. A probe that renders frames back to back
+    without yielding to rAF renders stale ones: the shadow maps and a
+    RenderPipeline's passes update once per node frame and are skipped.
+    `await new Promise(requestAnimationFrame)` between frames.
+  - To find the draws behind a GL error, wrap the
+    `WebGL2RenderingContext.prototype` draw calls with a `getError()`
+    after each, and `renderer.backend.draw` to know the render object
+    (material, object, `context.renderTarget`) of each.
+  - The guest's canvas is transparent where it draws nothing, and
+    `toDataURL` gives unpremultiplied colours: composite a PNG over the
+    page's background (#6f8fb8) before reading it, or faint additive
+    effects show as saturated wedges.
   - To find what draws a bad region, render with one top-level group
     hidden at a time (`ManhattanCityGrid`, `ManhattanCityBlocks`,
     `ManhattanStreetDetails`, `ManhattanLandmarks`, `Boroughs`, ...).

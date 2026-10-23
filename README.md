@@ -62,6 +62,20 @@ const modelMatrix = cityModelMatrix(guest, Cesium);              // ENU at (lon0
 ellipsoid at Manhattan, as in Cesium World Terrain). [`guest.html?ground=demo`](guest.html?ground=demo) drapes the city
 over a made-up 40 m hill on Midtown, with no host.
 
+The lift moves vertices, and the city's flat layers at the street (the road deck, the seawall, the lawns, the
+sidewalks' slabs, the paint) are partly built from long triangles, which would cut straight through a hill. So
+`setGround` also splits those layers where the ground bends away from them, until it is within 4 mm of every triangle:
+flat ground costs nothing, the demo hill ~0.7 M more triangles and a few seconds of main thread on each `setGround`.
+
+### Measuring it
+
+[`guest.html`](guest.html) reads out the frame rate, the frame time and the JavaScript time in `update()` and
+`render()` (render's includes any wait on the GPU), with the draws and triangles of a frame. It takes
+`?view=aerial` (the orbit, the default), `street` (5th Ave at 37th St, looking north) or `park`; `?ground=demo`;
+`?shadows=0`; `?lights=0` (no lamps and no ClusteredLighting, `createGuest({ lights: false })`); and `?dpr=1` (the
+drawing buffer in CSS pixels; by default it is in device pixels, 4× as many on a 2× screen, where the app renders at a
+pixel ratio of 1). The app takes `?webgl` to run three's WebGL2 backend, as the guest does, in a browser with WebGPU.
+
 ### Inside a host's frame
 
 A host that draws the guest into its own framebuffer, against its own depth, rather than compositing a separate canvas,
