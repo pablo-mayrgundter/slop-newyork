@@ -340,11 +340,12 @@ async function createGuest(options = {}) {
       };
     }
   });
-  // Lights (street and store lamps, the cars' pools) are placed on the CPU: lifted each frame. One whose y has changed
-  // since (a car's lamp, re-placed every frame) is lifted from its new y
+  // Lamps (street and store lights, the cars' pools) are placed on the CPU: lifted each frame. One whose y has changed
+  // since (a car's lamp, re-placed every frame) is lifted from its new y. Only point and spot lights: the sun (a
+  // SunLight, not a DirectionalLight) is placed by its direction, which a lift would tip under the horizon
   const lights = [];
   scene.traverse((o) => {
-    if (o.isLight && !o.isDirectionalLight && !o.isHemisphereLight && !o.isAmbientLight) lights.push(o);
+    if (o.isPointLight || o.isSpotLight) lights.push(o);
   });
   const _p = new THREE.Vector3();
   const liftY = (o) => {
