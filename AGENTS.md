@@ -48,7 +48,7 @@ code.
   `python3 -m http.server 8000`) and open `/`.
   - A new script goes into `nycAppScripts` at the point where what it
     reads from `window.NYC` is already defined.
-- **Tests:** `node --test tests/*.cjs tests/*.mjs` (101 tests, about
+- **Tests:** `node --test tests/*.cjs tests/*.mjs` (106 tests, about
   40 s). Plain `node --test tests/` fails, so use the globs. The tests
   run the scripts in `node:vm` with stubs for `window.NYC`, three.js
   and the DOM, or parse index.html and the scripts as text. No GPU and
