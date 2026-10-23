@@ -111,11 +111,25 @@
     };
     const view = VIEWS[params.get('view')] || VIEWS.aerial;
     window.__NYC_VIEWS = VIEWS; // [eye, target] by name, for probes
+    // Near and far for where the camera is. A real host hands over its own projection (Cesium its frustums, and under
+    // its log depth the guest's logDepth). This stand-in draws into a 24-bit depth buffer with no reversed-Z (the app's
+    // float reversed-Z needs EXT_clip_control, which bypasses a NetGL recorder), whose step at distance d is about
+    // d² / (near · 2^24): at a fixed 1 m near that's 0.13 m at the orbit's 1.5 km, coarser than the centimetres between
+    // the deck, the paint, the kerbs and the lawns, which z-fought. Nothing comes nearer than a fraction of the height
+    // over the ground (the towers' tops aside), so near scales with it: 26 m at the orbit (5 mm steps at 1.5 km),
+    // 0.3 m in the street
+    function fitNearFar(camera) {
+      const { x, y, z } = camera.position;
+      camera.near = Math.min(Math.max(0.05 * (y - guest.groundOffsetAt(x, z)), 0.3), 50);
+      camera.far = 60000;
+    }
+    window.__NYC_NEAR = fitNearFar; // for probes
     function placeCamera(angle) {
       const [eye, target] = view(angle);
       hostCamera.position.copy(eye);
       hostCamera.lookAt(target);
       hostCamera.updateMatrixWorld();
+      fitNearFar(hostCamera);
       hostCamera.updateProjectionMatrix();
     }
 
