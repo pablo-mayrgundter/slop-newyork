@@ -367,6 +367,20 @@ test('the ground layers split until no edge spans more than the detail across th
   assert.equal(subdivideTriangles({ attrs: { position: { array: [0, 0, 0, 0, 0, 5, 5, 0, 0], itemSize: 3 } }, index: null, world: [0, 0, 0, 0, 0, 5, 5, 0, 0] }, 20), null);
 });
 
+test('slivers (corners in a line) never ask for a split; walls (in a line across x, z only) do', () => {
+  const { subdivideTriangles } = loadGuest();
+  // A fan of flat slivers along a line: on real terrain such shore slivers never settled, and the splitting looped
+  const xs = [0, 7, 13, 31, 40, 55, 58, 77, 90, 100];
+  const flat = xs.flatMap((x) => [x, 0, x * 0.3]);
+  const fan = [];
+  for (let i = 1; i + 1 < xs.length; i++) fan.push(0, i, i + 1);
+  assert.equal(subdivideTriangles({ attrs: { position: { array: flat, itemSize: 3 } }, index: fan, world: flat }, 2), null);
+  // A wall 100 m long and 0.25 m tall splits to the detail
+  const wall = [0, 0, 0, 100, 0, 0, 100, 0.25, 0, 0, 0.25, 0];
+  const out = subdivideTriangles({ attrs: { position: { array: wall, itemSize: 3 } }, index: [0, 1, 2, 0, 2, 3], world: wall }, 20);
+  assert.ok(out && out.triangles >= 10, `${out && out.triangles}`);
+});
+
 test('a triangle budget stops the splitting before a pass would pass it, and the mesh stays watertight', () => {
   const { subdivideTriangles } = loadGuest();
   const P = [[0, 0, 0], [0, 0, 60], [100, 0, 60], [100, 0, 0]];

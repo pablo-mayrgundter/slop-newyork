@@ -79,8 +79,10 @@ guest.stats.drape;   // { layers, split, capped, vertices: [before, after], tria
 
 `tolerance` (m, default 0.004), `minEdge` (m, default 2: no edge is split shorter), `maxCells` (default 4: no edge
 longer than this many ground cells) and `maxTriangles` (default unbounded: each layer splits within its share of it,
-by area, stopping before a pass that would pass it, so it stays watertight). With the drape above, the same heights
-on a 100 m grid take 1.6 M triangles and ~5 s on a slow CPU.
+by area, a layer keeping at least its own; it stops before a pass that would pass it, so it stays watertight). With
+the drape above, the same heights on a 100 m grid take 1.7 M triangles and ~5 s on a slow CPU. Slivers (triangles whose
+corners are in a line, as the deck's triangulation leaves along straight shores) never ask for a split themselves:
+on real terrain they never settled, and the drape looped for ever.
 
 ### What the guest doesn't build
 

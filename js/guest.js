@@ -242,7 +242,7 @@ function fillHoles(h, cols, rows) {
 // stray by the curb's lift error.
 // That detail is for a ground with a few smooth hills (the demo's). Real terrain bends a little everywhere: sampled
 // from Terrarium on a 100 m grid, the 4 mm tolerance split every layer down to a few metres across the whole island,
-// for minutes and gigabytes (the page died). A host that sees the city from afar (a globe) passes setGround a coarser
+// for minutes and gigabytes (the page hung). A host that sees the city from afar (a globe) passes setGround a coarser
 // drape ({ tolerance, minEdge, maxCells, maxTriangles }: DRAPE_DEFAULTS' fields), and maxTriangles bounds it whatever
 // the ground: each layer splits within its share of it (by area), a pass at a time, so it stays watertight
 const DRAPE_ROOTS = ['ManhattanCityGrid', 'RoadMarkings'];
@@ -361,10 +361,17 @@ function subdivideTriangles(mesh, needsSplit, band = DRAPE_BAND, maxTriangles = 
       const b = active[3 * i + 1];
       const c = active[3 * i + 2];
       const longest = longests[i];
-      // A sliver (its corners in a line across x, z, as the deck's triangulation leaves along straight shores) covers
-      // nothing, so it never asks for a split: it splits only along with its neighbours' edges. Split for itself, it
-      // never settled on real terrain (its halves are slivers just as long, and the splitting went on for ever)
-      const twiceArea = Math.abs((X(b) - X(a)) * (Z(c) - Z(a)) - (X(c) - X(a)) * (Z(b) - Z(a)));
+      // A sliver (its corners in a line, as the deck's triangulation leaves along straight shores) covers nothing, so
+      // it never asks for a split: it splits only along with its neighbours' edges. Split for itself, it never settled
+      // on real terrain (its halves were slivers on the same line, whose edges' midpoints, their keys, coincided), and
+      // the splitting went on for ever. A wall isn't one: its corners are in a line across x, z, but not in space
+      const ux = X(b) - X(a);
+      const uy = Y(b) - Y(a);
+      const uz = Z(b) - Z(a);
+      const vx = X(c) - X(a);
+      const vy = Y(c) - Y(a);
+      const vz = Z(c) - Z(a);
+      const twiceArea = Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
       if (twiceArea < SLIVER_HEIGHT * longest || !needsSplit(X(a), Z(a), X(b), Z(b), X(c), Z(c), longest)) {
         settled[i] = 1;
         continue;
