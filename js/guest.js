@@ -118,6 +118,9 @@ async function createGuest(options = {}) {
   ]);
   const highwayTraffic = createHighwayTraffic(scene, cityGrid.highwayLanes);
   buildRoadPaint(scene, trafficSystem.network);
+  // The crowds skin each person from a storage buffer read by index, which the WebGL2 backend can't do (it smears them
+  // into a sheet): the pedestrians still walk and keep traffic waiting, undrawn
+  for (const name of ['PeopleNear', 'PeopleFar']) scene.getObjectByName(name)?.removeFromParent();
 
   // Left out before the culling set-up below, which would otherwise chunk their props and give their buildings shadow
   // stand-ins (at the scene's top level, drawn whatever their group's visibility)

@@ -108,6 +108,11 @@ async function initApp() {
   markInit('traffic');
   const highwayTraffic = createHighwayTraffic(scene, cityGrid.highwayLanes);
   buildRoadPaint(scene, trafficSystem.network);
+  // The crowds skin each person from a storage buffer read by index (pedestrians.js), WebGPU only: on the WebGL2
+  // fallback they'd smear into a sheet, so there the pedestrians walk undrawn
+  if (!renderer.backend.isWebGPUBackend) {
+    for (const name of ['PeopleNear', 'PeopleFar']) scene.getObjectByName(name)?.removeFromParent();
+  }
   markInit('roadPaint');
 
   // 4. Initialize Third-Person Controllers (Person, Car, Cyclist, Helicopter) & Multi-Camera System
@@ -126,8 +131,10 @@ async function initApp() {
 
   // Small InstancedMeshes (<= 1000 instances) keep their matrices in uniform buffers that three.js
   // re-uploads on every draw of every pass (~2.5 MB/frame with the shadow cascades, stalling the GPU queue).
-  // Storage attributes are only uploaded when instanceMatrix.needsUpdate is set.
-  scene.traverse((object) => {
+  // Storage attributes are only uploaded when instanceMatrix.needsUpdate is set. WebGPU only: on the WebGL2 fallback
+  // (no navigator.gpu) instance matrices are vertex attributes already, and storage ones there drew the facade boxes
+  // as streaks across the island and left the towers out.
+  if (renderer.backend.isWebGPUBackend) scene.traverse((object) => {
     if (object.isInstancedMesh) {
       object.instanceMatrix = new THREE.StorageInstancedBufferAttribute(object.instanceMatrix.array, 16);
     }
