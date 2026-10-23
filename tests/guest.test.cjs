@@ -306,3 +306,50 @@ test('the bounds take the flat box with the ground\'s lift and the curve, padded
   assert.ok(Math.abs(b.min.y - (box.min.y + lift.min)) < 1e-9 && Math.abs(b.max.y - (box.max.y + lift.max)) < 1e-9);
   assert.equal(b.min.x, box.min.x);
 });
+
+test('the ground layers split until no edge spans more than the detail across the ground, watertight', () => {
+  const { subdivideTriangles } = loadGuest();
+  // A 100 x 60 m slab top (two triangles, up), a 100 m x 0.25 m side under its north edge, a face looking down, and a
+  // wall reaching out of the band; uv = (x / 100, z / 60)
+  const P = [[0, 0.25, 0], [0, 0.25, 60], [100, 0.25, 60], [100, 0.25, 0], [0, 0, 0], [100, 0, 0], [0, 0, 60], [100, 0, 60], [0, 9, 0]];
+  const position = P.flat();
+  const uv = P.flatMap(([x, , z]) => [x / 100, z / 60]);
+  const normal = P.flatMap(() => [0, 1, 0]);
+  const index = [0, 1, 2, 0, 2, 3, /* side */ 0, 3, 5, 0, 5, 4, /* down */ 4, 7, 6, /* tall */ 4, 5, 8];
+  const mesh = { attrs: { position: { array: position, itemSize: 3 }, uv: { array: uv, itemSize: 2 }, normal: { array: normal, itemSize: 3 } }, index, world: position };
+  const out = subdivideTriangles(mesh, 20);
+  const pos = out.attrs.position;
+  const at = (i) => [pos[3 * i], pos[3 * i + 1], pos[3 * i + 2]];
+  const tris = [];
+  for (let t = 0; t < out.index.length; t += 3) tris.push([out.index[t], out.index[t + 1], out.index[t + 2]].map(at));
+  const flat = (y) => (t) => t.every((p) => p[1] === y);
+  const top = tris.filter(flat(0.25));
+  const area = (t) => ((t[1][2] - t[0][2]) * (t[2][0] - t[0][0]) - (t[1][0] - t[0][0]) * (t[2][2] - t[0][2])) / 2; // the normal's y / 2: > 0 up
+  const lenXZ = (p, q) => Math.hypot(p[0] - q[0], p[2] - q[2]);
+  // the top: every edge within 20 m, the same area, wound as before (up), and no T-junctions: each inner edge twice
+  for (const t of top) for (let k = 0; k < 3; k++) assert.ok(lenXZ(t[k], t[(k + 1) % 3]) <= 20 + 1e-9);
+  assert.ok(Math.abs(top.reduce((s, t) => s + area(t), 0) - 6000) < 1e-6);
+  assert.ok(top.every((t) => area(t) > 0));
+  const edges = new Map();
+  for (const t of top) for (let k = 0; k < 3; k++) {
+    const key = [t[k], t[(k + 1) % 3]].map((p) => p.join()).sort().join('|');
+    edges.set(key, (edges.get(key) || 0) + 1);
+  }
+  let boundary = 0;
+  for (const [key, n] of edges) {
+    assert.ok(n <= 2, key);
+    if (n === 1) boundary += lenXZ(...key.split('|').map((s) => s.split(',').map(Number)));
+  }
+  assert.ok(Math.abs(boundary - 320) < 1e-6, 'the outline is whole: no edge split on one side and not the other');
+  // the side splits along with the top's edge it shares, so it follows the ground too
+  const side = tris.filter((t) => t.every((p) => p[2] === 0) && t.some((p) => p[1] > 0) && t.every((p) => p[1] <= 0.25));
+  assert.ok(side.length >= 10 && side.every((t) => t.every((p, k) => lenXZ(p, t[(k + 1) % 3]) <= 20 + 1e-9)));
+  // attributes interpolate linearly; the face looking down and the tall wall are left whole
+  for (let i = 0; i < pos.length / 3; i++) {
+    assert.ok(Math.abs(out.attrs.uv[2 * i] - pos[3 * i] / 100) < 1e-6 && Math.abs(out.attrs.uv[2 * i + 1] - pos[3 * i + 2] / 60) < 1e-6);
+  }
+  assert.equal(tris.filter(flat(0)).length, 1);
+  assert.equal(tris.filter((t) => t.some((p) => p[1] === 9)).length, 1);
+  // nothing to split: null
+  assert.equal(subdivideTriangles({ attrs: { position: { array: [0, 0, 0, 0, 0, 5, 5, 0, 0], itemSize: 3 } }, index: null, world: [0, 0, 0, 0, 0, 5, 5, 0, 0] }, 20), null);
+});
