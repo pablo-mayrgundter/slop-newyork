@@ -217,7 +217,7 @@ test('the material pass sees each node material once, and keys its program by wh
   const shared = mat();
   const placed = mat({ vertexNode: {} }); // places its own vertices: no lift
   const classic = { isNodeMaterial: false, customProgramCacheKey() { return 'classic'; } };
-  const own = mat({ outputNode: 'own' });
+  const own = mat({ outputNode: 'own', mrtNode: { outputNodes: { normal: 0, metalRough: 0 } } });
   const objects = [{ material: shared }, { material: [shared, placed] }, { material: classic }, { material: own }, {}];
   const scene = { traverse: (fn) => objects.forEach(fn) };
 
@@ -231,6 +231,7 @@ test('the material pass sees each node material once, and keys its program by wh
   assert.equal(classic.customProgramCacheKey(), 'classic');
   assert.deepEqual(shared.outputNode, ['srgb', null]);
   assert.deepEqual(own.outputNode, ['srgb', 'own']);
+  assert.equal(own.mrtNode, null, "a material's own MRT outputs go: with no MRT they'd replace its colour output");
   assert.equal(shared.setupDepth, setupDepth);
   assert.equal(shared.depthNode, undefined, 'the depth goes in through setupDepth: a shadow pass takes a depthNode for its own');
 

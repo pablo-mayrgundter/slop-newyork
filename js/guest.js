@@ -298,13 +298,20 @@ function setCompositeOutput(renderer) {
 // Each node material in the scene, once: the ground's lift (lift(material), for those that don't place their own
 // vertices), the output encoding (output(outputNode) → outputNode) and the depth (setupDepth, the material's method).
 // A material's program then differs from one with the same nodes without these, so its cache key says which it has.
-// Returns how many materials it saw
+// Every material also loses its own MRT outputs (mrtNode: tsl-materials.js _transparentEffectMRT and the like, the
+// normal and metalRough the app's SSR pass reads). The guest draws with no MRT, and drawn into a render target (the
+// renderer's sRGB output buffer) with none, a material's mrtNode replaces its colour output instead of joining it
+// (NodeMaterial.setupOutput), leaving its fragment shader no output for the colour buffer: WebGL2 rejects the draw
+// (GL_INVALID_OPERATION, "Active draw buffers with missing fragment shader outputs"), and the lane paint, the
+// highways' markings, the park lamps' pools, the steam, the god rays, the cars' contact shadows, headlight beams and
+// flares and the tunnels' shade went undrawn. Returns how many materials it saw
 function prepareMaterials(scene, { lift = null, output = null, setupDepth = null } = {}) {
   const seen = new Set();
   scene.traverse((o) => {
     for (const m of [].concat(o.material || [])) {
       if (!m || !m.isNodeMaterial || seen.has(m)) continue;
       seen.add(m);
+      if (m.mrtNode) m.mrtNode = null;
       const tags = [];
       if (lift && !m.vertexNode) {
         lift(m);
