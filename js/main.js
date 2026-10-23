@@ -78,9 +78,10 @@ async function initApp() {
   await renderer.init();
   markInit('renderer');
 
-  // ?ground=demo: the city drawn over a made-up 40 m hill on Midtown (js/ground.js, THE APP ON THE GROUND), whose nodes
-  // go in before the city is built. null without it, and nothing below changes
-  const appGround = window.NYC.createAppGround(new URLSearchParams(location.search).get('ground'));
+  // ?ground=demo (a made-up hill on Midtown, ?hill= and ?spread=) or ?ground=terrain (Manhattan's real ground, whose
+  // tiles load while the city builds): the city drawn over it (js/ground.js, THE APP ON THE GROUND), whose nodes go in
+  // before the city is built. null without it, and nothing below changes
+  const appGround = window.NYC.createAppGround(new URLSearchParams(location.search));
 
   // 2. Build Scene & Physical Atmospheric Sky / PMREM IBL / 4096x4096 Shadow Lighting
   const scene = new THREE.Scene();
@@ -151,7 +152,7 @@ async function initApp() {
       object.instanceMatrix = new THREE.StorageInstancedBufferAttribute(object.instanceMatrix.array, 16);
     }
   });
-  if (appGround) appGround.attach(scene, markInit); // the lift into every material, the lamps, and the hill (the drape)
+  if (appGround) await appGround.attach(scene, markInit); // the lift into every material, the lamps, the ground (drape)
 
   // 5. TSL RenderPipeline with Half-Res Screen Space Reflections (SSRNode), Bloom & Filmic Toning
   //    SSR skips pixels with zero metalness, so fading it out with distance spares the far facades

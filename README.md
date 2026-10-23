@@ -4,7 +4,14 @@ A New York City simulation built with [three.js](https://threejs.org/), WebGPURe
 
 [Try it live](https://mrdoob.github.io/slop-newyork/)
 
-[`?ground=demo`](https://pablo-mayrgundter.github.io/slop-newyork/?ground=demo) drives the city over a 40 m hill (a test ground)
+[`?ground=terrain`](https://pablo-mayrgundter.github.io/slop-newyork/?ground=terrain) drives the city over Manhattan's real
+ground, from AWS's public [Terrarium elevation tiles](https://registry.opendata.aws/terrain-tiles/): Murray Hill, Central
+Park's rises, the Morningside Park cliff, and, by helicopter (the streets end at 129th St), Coogan's Bluff, Washington
+Heights, Fort Tryon and Inwood Hill.
+[`?ground=demo`](https://pablo-mayrgundter.github.io/slop-newyork/?ground=demo) drives it over a made-up hill on Midtown,
+40 m high and 1.1 km across, or as `&hill=<m>&spread=<m>` say:
+[`?ground=demo&hill=150&spread=600`](https://pablo-mayrgundter.github.io/slop-newyork/?ground=demo&hill=150&spread=600).
+Only the drawing follows the ground; the simulation stays flat ([`js/ground.js`](js/ground.js), THE APP ON THE GROUND).
 
 ## Make it your own
 
@@ -64,7 +71,8 @@ const modelMatrix = cityModelMatrix(guest, Cesium);              // ENU at (lon0
 `inverseViewMatrix` is the `matrixWorld` for `setView`. `seaLevel` defaults to −32.7 m (mean sea level over the WGS84
 ellipsoid at Manhattan, as in Cesium World Terrain). [`guest.html?ground=demo`](guest.html?ground=demo) drapes the city
 over a made-up 40 m hill on Midtown, with no host, and [`index.html?ground=demo`](index.html?ground=demo) drives the app over
-the same hill (the ground's code, [`js/ground.js`](js/ground.js), is shared by the two).
+the same hill (the ground's code, [`js/ground.js`](js/ground.js), is shared by the two; the app's ground is Manhattan's
+only, linear over its grid's triangles and its layers cut to them exactly, rather than split to a tolerance).
 
 The lift moves vertices, and the city's flat layers at the street (the road deck, the seawall, the lawns, the
 sidewalks' slabs, the paint) are partly built from long triangles, which would cut straight through a hill. So

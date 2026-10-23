@@ -23,7 +23,7 @@ code.
 | What the project is, the live demo | [README.md](./README.md) |
 | How the app boots: script order, the three.js import map, `window.NYC` | [index.html](./index.html) (`nycAppScripts`, the import map, the module script that fills `window.NYC`), then [js/main.js](./js/main.js) `initApp` |
 | The city as a guest in another engine (a NetGL guest of a globe) | README [As a guest in another engine](./README.md#as-a-guest-in-another-engine); [js/guest.js](./js/guest.js) (its header, `THE HOST'S FRAME` and `THE GUEST`); [js/guest-entry.mjs](./js/guest-entry.mjs); [guest.html](./guest.html), its demo page |
-| The ground under the city (the frame on the Earth, heights, the lift, the drape, the lamps), shared by the guest and the app's `?ground=demo` | [js/ground.js](./js/ground.js): `THE FRAME ON THE EARTH`, `THE GROUND`, `THE DRAPE`, `THE DEMO GROUND`, `THE APP ON THE GROUND` |
+| The ground under the city (the frame on the Earth, heights, the lift, the drape, the lamps), shared by the guest and the app's `?ground=demo` and `?ground=terrain` | [js/ground.js](./js/ground.js): `THE FRAME ON THE EARTH`, `THE GROUND`, `THE DRAPE`, `THE DEMO GROUND`, `THE APP ON THE GROUND`; the real heights, [js/terrarium.mjs](./js/terrarium.mjs) |
 | The host side of the guest (recorder, replay, compositing) | [portal](https://github.com/pablo-mayrgundter/portal): its AGENTS.md and [portal-netgl DESIGN.md](https://github.com/pablo-mayrgundter/portal/blob/main/packages/portal-netgl/DESIGN.md) |
 | The world frame, lon/lat to world | [tools/geo-base.mjs](./tools/geo-base.mjs) section 1, FRAME; [js/boroughs.js](./js/boroughs.js) `LL()` |
 | The real geography and how it's built | [tools/build-geodata.mjs](./tools/build-geodata.mjs) and the `tools/geo-*.mjs` it imports; inputs in `tools/data/` (Overpass queries `q_*.overpassql`, fetched with `tools/overpass.sh`) |
@@ -78,8 +78,10 @@ code.
     `?lights=0` (no lamps, no ClusteredLighting), `?ground=demo`,
     `?view=aerial|street|park` and `?dpr=1`, and reads out fps, the frame
     time and the JS time in `update()` and `render()`. The app takes
-    `?webgl` to force the WebGL2 backend in a browser with WebGPU, and
-    `?ground=demo` to drive over the demo hill.
+    `?webgl` to force the WebGL2 backend in a browser with WebGPU,
+    `?ground=demo` to drive over the demo hill (`&hill=<m>` its height,
+    default 40, `&spread=<m>` its σ, default 1100), and `?ground=terrain`
+    to drive over Manhattan's real ground (Terrarium tiles).
   - A material's own `mrtNode` replaces its colour output when it draws
     into a render target with no MRT, and WebGL2 then rejects the draw
     ("Active draw buffers with missing fragment shader outputs"). The
@@ -156,12 +158,14 @@ code.
   Anything new that uses storage buffers, compute or `attributeArray`
   random access needs a WebGL2 path or a guard on
   `renderer.backend.isWebGPUBackend`.
-- **The app on a ground** (`index.html?ground=demo`, js/ground.js THE
-  APP ON THE GROUND): main.js makes `appGround` before the build (null
-  without the parameter, and every use is `if (appGround)`), takes the
-  layers before the culling set-up, attaches the lift before the shaders
-  compile, and calls `beforeRender(cameraSystem)` between the simulation
-  and the render. Things to know:
+- **The app on a ground** (`index.html?ground=demo`, `&hill=`,
+  `&spread=`, or `?ground=terrain`; js/ground.js THE APP ON THE GROUND):
+  main.js makes `appGround` before the build (null without the parameter,
+  and every use is `if (appGround)`), takes the layers before the culling
+  set-up, awaits `attach()` (the lift, then the heights: the terrain's
+  tiles load while the city builds) before the shaders compile, and calls
+  `beforeRender(cameraSystem)` between the simulation and the render.
+  Both grounds take one path; only the heights differ. Things to know:
   - The simulation, the physics, the colliders and the camera system all
     stay flat. Only the drawing is lifted: the lamps each frame, and the
     camera for the render only (cameras.js places it flat again each
@@ -169,22 +173,62 @@ code.
     `camera.updateMatrixWorld()`, so the sim's frustum is the flat one).
   - Its ground differs from a host's: no globe's curve (the app's 60 km
     water plane is two triangles whose corners the curve would sink 70 m),
-    `height0` at the flat land so the shore and the water stay put, and
-    a grid reaching 7 km or more from the hill, where it's gone.
-    Only Manhattan's layers are split: draping 'Boroughs' too took
-    `setGround` from 4 s to 26 s headless and added 6.4 M triangles.
-  - Every face of a ground layer in the band follows the ground, its
-    underside too. An unsplit triangle is a chord of the hill: under the
-    ground on the crown, but over it past σ, where the hill is concave.
-    Central Park's extrusions had 4 km undersides that stood 4–11 m over
-    Sheep Meadow and north of it, a roof at a driver's eye, and their
-    shadow stand-ins shaded the meadow. The ground layers now cast their
-    own shadows (scene-culling.js skips `userData.flatGeometry`).
-    Undersides cost +0.42 M triangles (1.71 M to 2.13 M) and `setGround`
-    6.8 s to 11.5 s headless. To find such a layer, project each mesh's
+    `height0` at the flat land (the demo) or the deck's 2.2 m freeboard
+    (the terrain, in metres above the sea, its bathymetry clamped to 0) so
+    the shore and the water stay put, and a grid out to where the ground
+    is 0 (the demo's grows with `spread`: 6.5 σ from the hill).
+  - The ground is Manhattan's only (`manhattanMask`), for both grounds:
+    the boroughs and New Jersey model relief of their own (the Palisades,
+    Jersey City Heights, Governors Island), which real heights or a wide
+    hill's tail under them would double. The George Washington Bridge is
+    `userData.groundFixed` (no lift, no shadow stand-in): the flat city
+    ramps its approach up to the real bluff's height already. Anything at
+    or under the harbour's surface keeps its height (`SHORE_RAMP`), so a
+    seawall's foot stays in the water as its top rises with the shore.
+  - The app's ground is linear over its grid's triangles (makeGround
+    `linear`; the GPU reads the cell's four texels, `map.load`), and its
+    layers are cut along the grid's lines and diagonals
+    (`conformTriangles`): exact, watertight, so the paint stays 12 mm over
+    the deck on any slope. Don't go back to a tolerance drape for real
+    terrain: celestiary's lean one (10 cm, 8 m, 1.5 M) left the deck more
+    than 12 mm over the ground at 43% of the island, up to 29 m where its
+    budget ran out, in 24 s; cut to the 40 m grid it's exact, ~3.0 M
+    triangles. Cost is edge length times line density, not area: the
+    sidewalks' strips and walls are most of it (20 m: 7.6 M, 30 m: 4.9 M,
+    40 m: 3.0 M). The slabs' undersides at the deck (`dropUnder`, y ≤
+    0.35 m, FrontSide only) are left out: cut they'd cost a quarter more,
+    whole they'd stand over concave ground (the roof bug below). A drape
+    lab in node (the layers' flat geometry dumped from a headless page,
+    ground.js in `node:vm` with three.core.js) answers cost questions in
+    seconds instead of a five-minute page load.
+  - What isn't a ground layer rides the vertex lift: a building's foot is
+    a chord between its corners, over the ground where it bends, so on the
+    linear ground the buildings, landmarks, street furniture and boroughs
+    (`skirtObjects`, `userData.groundSkirt`) sink their geometry's lowest
+    vertices by 40 × the slope (≤ 12 m), and lit materials tilt their
+    normals with the lift (the map's RGBA: offset and gradient). Assigning
+    `normalLocal` inside a `positionNode` works (after instancing too);
+    check `builder.geometry.hasAttribute('normal')` first or TSL warns.
+  - With the tolerance drape (the guest's), every face of a ground layer
+    in the band follows the ground, its underside too. An unsplit triangle
+    is a chord of the hill: under the ground on the crown, but over it
+    past σ, where the hill is concave. Central Park's extrusions had 4 km
+    undersides that stood 4–11 m over Sheep Meadow and north of it, a
+    roof at a driver's eye, and their shadow stand-ins shaded the meadow.
+    The ground layers cast their own shadows (scene-culling.js skips
+    `userData.flatGeometry`). To find such a layer, project each mesh's
     triangle under a point with each corner lifted, and compare that
     with the ground there plus its flat height. Look past the crown,
     where the hill is concave.
+  - Terrarium (`s3.amazonaws.com/elevation-tiles-prod`) answers curl in
+    the sandbox; in a headless probe serve the tiles from Node in
+    `page.route` (Chromium doesn't trust the sandbox proxy's CA), with
+    `access-control-allow-origin: *`, cached on disk. The car, the person
+    and the bike can't go north of ~129th St (`findTeleportPosition`
+    clamps to the detailed island): see Washington Heights by helicopter,
+    or with a camera placed after `beforeRender`. Zoom 13 matches 14 and 15 over the
+    island to 0.35 m RMS (the source is ~10 m); its pits and spikes (a
+    38 m spike at Foley Square at zoom 14) go in a 3 × 3 median per tile.
   - It keeps the materials' `mrtNode`s (`prepareMaterials` `keepMRT`):
     the scene pass's MRT for SSR and bloom joins them.
   - `window.__NYC_APP.ground.stats` has the drape's numbers and
