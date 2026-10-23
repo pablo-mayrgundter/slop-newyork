@@ -1,0 +1,40 @@
+name: Deploy to GitHub Pages
+
+# Publishes the site to https://pablo-mayrgundter.github.io/slop-newyork/ by
+# pushing the staged files (.github/actions/build) to the gh-pages branch's
+# root. Pages serves that branch (Settings -> Pages -> Deploy from a branch:
+# gh-pages, / (root)), not an Actions artifact. clean-exclude keeps the PR
+# previews under pr-preview/ (pr-preview.yml) through main deploys.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gh-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - uses: ./.github/actions/build
+
+      - name: Deploy to gh-pages root, keeping the previews
+        uses: JamesIves/github-pages-deploy-action@v4.8.0
+        with:
+          folder: dist
+          branch: gh-pages
+          clean: true
+          clean-exclude: |
+            pr-preview
+          # Rebase onto a preview deployed meanwhile, rather than force-push
+          # over it. They touch different paths, so the rebase is clean.
+          force: false
+          commit-message: "deploy from ${{ github.sha }}"
