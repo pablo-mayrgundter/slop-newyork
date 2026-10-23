@@ -81,19 +81,13 @@
     hourInput.addEventListener('input', () => setSunFromHour(Number(hourInput.value)));
     setSunFromHour(Number(hourInput.value));
 
-    // ?ground=demo: a ground as a host would hand it over (THE GROUND, js/guest.js), standing in for its terrain: a smooth
-    // 40 m hill over Midtown on flat land 5 m above the sea, in heights above the ellipsoid (sea level 32.7 m under it,
-    // as at Manhattan). The guest adds the globe's curve itself
+    // ?ground=demo: a ground as a host would hand it over (js/ground.js, THE DEMO GROUND), standing in for its terrain: a
+    // smooth 40 m hill over Midtown on flat land 5 m above the sea, in heights above the ellipsoid (sea level 32.7 m under
+    // it, as at Manhattan). The guest adds the globe's curve itself
     if (params.get('ground') === 'demo') {
-      const seaLevel = -32.7;
       const { lonLat } = guest.groundSamples(40);
-      const heights = new Float64Array(lonLat.length / 2);
-      for (let i = 0; i < heights.length; i++) {
-        const p = guest.frame.lonLatToWorld(lonLat[2 * i], lonLat[2 * i + 1]);
-        const d2 = (p.x + 300) ** 2 + (p.z + 900) ** 2;
-        heights[i] = seaLevel + 5 + 40 * Math.exp(-d2 / (2 * 1100 ** 2));
-      }
-      guest.setGround(heights, { seaLevel });
+      const seaLevel = window.NYC.DEMO_SEA_LEVEL;
+      guest.setGround(window.NYC.demoGroundHeights(lonLat, guest.frame, seaLevel), { seaLevel });
     }
 
     status.textContent = 'Compiling…';

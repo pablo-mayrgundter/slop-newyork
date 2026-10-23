@@ -78,6 +78,10 @@ async function initApp() {
   await renderer.init();
   markInit('renderer');
 
+  // ?ground=demo: the city drawn over a made-up 40 m hill on Midtown (js/ground.js, THE APP ON THE GROUND), whose nodes
+  // go in before the city is built. null without it, and nothing below changes
+  const appGround = window.NYC.createAppGround(new URLSearchParams(location.search).get('ground'));
+
   // 2. Build Scene & Physical Atmospheric Sky / PMREM IBL / 4096x4096 Shadow Lighting
   const scene = new THREE.Scene();
   const lightingSystem = new LightingSystem(scene, renderer);
@@ -130,6 +134,7 @@ async function initApp() {
 
   // Island-wide static geometry: chunk & distance-cull the small props, shadow stand-ins for the big casters
   // (scene-culling.js)
+  if (appGround) appGround.takeLayers(scene); // the ground layers, their instanced slabs baked before the culling set-up
   const cullingRoots = ['ManhattanCityGrid', 'ManhattanCityBlocks', 'ManhattanStreetDetails', 'ManhattanLandmarks', 'Boroughs']
     .map((name) => scene.getObjectByName(name))
     .filter(Boolean);
@@ -146,6 +151,7 @@ async function initApp() {
       object.instanceMatrix = new THREE.StorageInstancedBufferAttribute(object.instanceMatrix.array, 16);
     }
   });
+  if (appGround) appGround.attach(scene, markInit); // the lift into every material, the lamps, and the hill (the drape)
 
   // 5. TSL RenderPipeline with Half-Res Screen Space Reflections (SSRNode), Bloom & Filmic Toning
   //    SSR skips pixels with zero metalness, so fading it out with distance spares the far facades
@@ -534,6 +540,7 @@ async function initApp() {
     cameraSystem,
     lightingSystem,
     mapSystem,
+    ground: appGround,
     selectMode,
     selectCamera,
     cycleCamera,
@@ -653,6 +660,8 @@ async function initApp() {
     lightingSystem.update(cameraSystem.currentPos);
     mapSystem.update();
     if (warmedUp) updateSceneCulling(cameraSystem.camera.position); // the warm-up frame draws every chunk
+
+    if (appGround) appGround.beforeRender(cameraSystem); // the lamps and the camera onto the ground, for the render
 
     // Render frame via TSL RenderPipeline (SSR + Bloom)
     if (!warmedUp) {
