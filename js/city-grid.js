@@ -531,7 +531,7 @@ function createWaterfrontPierMaterials() {
     const n = normalWorldGeometry;
     const wall = smoothstep(0.65, 0.35, abs(n.y));
     const h = positionWorld.x.mul(n.z.negate()).add(positionWorld.z.mul(n.x)); // horizontal coordinate along any wall
-    const y = positionWorld.y.sub(0.12);
+    const y = window.NYC.deckPosition().y.sub(0.12);
     const NO = 9.0; // sill/head beyond 1 => blank wall
     const fh = P.f([7.6, 4.6, 9.0, 5.2, 4.6, 6.0, 50, 4.2, 50, 50, 50]);
     const sill = P.f([0.42, 0.38, 0.74, 0.22, 0.44, 0.2, NO, 0.03, NO, NO, NO]);
@@ -576,7 +576,7 @@ function createWaterfrontPierMaterialsPart2(shared) {
     const P = picker(pv);
     const n = normalWorldGeometry;
     const h = positionWorld.x.mul(n.z.negate()).add(positionWorld.z.mul(n.x));
-    const y = positionWorld.y;
+    const y = window.NYC.deckPosition().y;
     const isWin = step(abs(pv.sub(11.0)), 0.5);
     const pane = band(fract(h.div(1.3)), 0.1, 0.9, max(fwidth(h).div(1.3), 0.0005));
     const base = P.c([0x68707a, 0xe0662b, 0x1b1c1f, 0xa2271f, 0xe7e6e1, 0x1e3451, 0xc6ae86, 0x8a6542, 0x2d2621, 0x252c2a, 0xf2ede0, 0x1a232a, 0x0a0a09, 0x8a939a,

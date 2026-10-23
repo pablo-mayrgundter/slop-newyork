@@ -59,7 +59,7 @@ function createTrafficSignalLensMaterial(isAvenueHead, clock) {
   const mat = new THREE.MeshBasicNodeMaterial();
   mat.colorNode = Fn(() => {
     const t = mod(clock, cycle);
-    const wy = positionWorld.y;
+    const wy = window.NYC.deckPosition().y; // the lenses' heights above the street
     const isTopRed = step(5.60, wy);
     const isBottomGreen = float(1.0).sub(step(5.24, wy));
     const isMidAmber = float(1.0).sub(isTopRed).mul(float(1.0).sub(isBottomGreen));

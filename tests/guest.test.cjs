@@ -83,3 +83,104 @@ test('worldToEnu agrees with metres along the ground', () => {
   assert.ok(Math.abs(en[0]) < 1 && Math.abs(en[1] - 1110.9) < 2, `north ${en}`);
   assert.ok(Math.abs(ee[1]) < 1 && Math.abs(ee[0] - 843.6) < 2, `east ${ee}`);
 });
+
+
+// THE GROUND (js/guest.js makeGround): the host's terrain heights at the guest's sample points, as lifts
+function loadGround(spacing = 100) {
+  const LL = read('js/boroughs.js').match(/function LL\(lon, lat\) \{[^]*?\n\}/)[0];
+  const window = { NYC: { THREE: { Matrix4 }, TSL: {}, Addons: {} } };
+  const context = vm.createContext({ window, Math });
+  vm.runInContext(`${LL}; window.NYC.lonLatToWorld = LL;`, context);
+  vm.runInContext(read('js/guest.js'), context);
+  const frame = window.NYC.makeGeoFrame();
+  const ground = window.NYC.makeGround(frame);
+  return { frame, ground, LL: window.NYC.lonLatToWorld, ...ground.samples(spacing) };
+}
+
+// The grid's points in world (x, z), in samples()' order
+const gridPoints = (ground, cols, rows) => {
+  const { x0, x1, z0, z1 } = ground.bounds;
+  const pts = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) pts.push([x0 + ((x1 - x0) * c) / (cols - 1), z0 + ((z1 - z0) * r) / (rows - 1)]);
+  }
+  return pts;
+};
+
+test('the ground\'s samples are lon/lat pairs that boroughs.js maps back onto the grid', () => {
+  const { ground, LL, lonLat, cols, rows } = loadGround(100);
+  const { x0, x1, z0, z1 } = ground.bounds;
+  assert.equal(lonLat.length, cols * rows * 2);
+  assert.ok((x1 - x0) / (cols - 1) <= 100 && (z1 - z0) / (rows - 1) <= 100, 'no farther apart than asked');
+  const pts = gridPoints(ground, cols, rows);
+  for (const i of [0, cols - 1, cols, Math.floor((cols * rows) / 2), cols * rows - 1]) {
+    const w = LL(lonLat[2 * i], lonLat[2 * i + 1]);
+    assert.ok(Math.hypot(w.x - pts[i][0], w.z - pts[i][1]) < 1e-6, `sample ${i}: ${w.x}, ${w.z} vs ${pts[i]}`);
+  }
+  // Rows run along z (grid south): the first row is the northern edge, so its latitudes are the highest
+  assert.ok(lonLat[1] > lonLat[2 * cols * (rows - 1) + 1]);
+});
+
+test('offsetAt reproduces a planar ground exactly, less the curve, with height0 its height at the tangent point', () => {
+  const { ground, cols, rows } = loadGround(100);
+  const plane = (x, z) => -20 + 0.004 * x - 0.0025 * z;
+  ground.set(gridPoints(ground, cols, rows).map(([x, z]) => plane(x, z)));
+  const t = ground.tangent;
+  assert.ok(Math.abs(ground.height0 - plane(t.x, t.z)) < 1e-9, `height0 ${ground.height0}`);
+  assert.ok(Math.abs(ground.offsetAt(t.x, t.z)) < 1e-4, 'nothing moves at the tangent point');
+  const curve = (x, z) => ((x - t.x) ** 2 + (z - t.z) ** 2) * ground.curvature;
+  for (const [x, z] of [[0, 0], [-2650, -7350], [2850, 6750], [1234.5, -3456.7], [-1000, 5000]]) {
+    const want = plane(x, z) - ground.height0 - curve(x, z);
+    // the offsets are stored as float32: ~1e-5 m at tens of metres
+    assert.ok(Math.abs(ground.offsetAt(x, z) - want) < 1e-4, `${x}, ${z}: ${ground.offsetAt(x, z)} vs ${want}`);
+  }
+  const { min, max } = ground.range;
+  assert.ok(min < 0 && max > 0 && max - min > 40, `range ${min}..${max}`);
+});
+
+test('the curve drops ~7.85 m 10 km from the tangent point, the same in every direction', () => {
+  const { ground, cols, rows } = loadGround(200);
+  ground.set(new Array(cols * rows).fill(12.5));
+  assert.equal(ground.height0, 12.5);
+  const t = ground.tangent;
+  for (const a of [0, 1, 2, 3]) {
+    const drop = -ground.offsetAt(t.x + 10000 * Math.cos(a), t.z + 10000 * Math.sin(a));
+    assert.ok(Math.abs(drop - 7.85) < 0.02, `drop ${drop}`);
+  }
+});
+
+test('offsetAt is 0 before set; set takes only heights for the latest samples', () => {
+  const { ground, cols, rows } = loadGround(200);
+  assert.equal(ground.offsetAt(1500, -6000), 0);
+  assert.equal(ground.on, false);
+  assert.throws(() => ground.set(new Array(cols * rows - 1).fill(0)), /match groundSamples/);
+  assert.throws(() => ground.set(new Array(cols * rows + 1).fill(0)), /match groundSamples/);
+  ground.set(gridPoints(ground, cols, rows).map(([x]) => x * 0.01));
+  const before = ground.offsetAt(2000, 0);
+  // A new sampling leaves the ground in place until heights for it arrive
+  const next = ground.samples(100);
+  assert.equal(ground.offsetAt(2000, 0), before);
+  assert.throws(() => ground.set(new Array(cols * rows).fill(0)), /match groundSamples/);
+  ground.set(new Array(next.cols * next.rows).fill(3));
+  assert.ok(Math.abs(ground.offsetAt(ground.tangent.x, ground.tangent.z)) < 1e-9);
+});
+
+test('set fills heights the host had none for, and holds the city\'s freeboard over the host\'s sea', () => {
+  const { ground, cols, rows } = loadGround(200);
+  const pts = gridPoints(ground, cols, rows);
+  // A river bed 15 m under the sea west of x = -1500, a tile missing in the north-east, land at 10 m elsewhere
+  const sea = -32.7;
+  const heights = pts.map(([x, z]) => (x < -1500 ? sea - 15 : x > 1500 && z < -5000 ? NaN : sea + 10));
+  heights[5] = null;
+  ground.set(heights, { seaLevel: sea });
+  assert.ok(Math.abs(ground.height0 - (sea + 10)) < 1e-9);
+  const t = ground.tangent;
+  const curve = (x, z) => ((x - t.x) ** 2 + (z - t.z) ** 2) * ground.curvature;
+  // The river bed lifts to 2.2 m over the sea, where the city's shore and piers stand over its own water
+  const river = ground.offsetAt(-2600, 0) + curve(-2600, 0);
+  assert.ok(Math.abs(river - (2.2 - 10)) < 1e-4, `river ${river}`);
+  // The hole takes its neighbours' 10 m
+  const hole = ground.offsetAt(2500, -6500) + curve(2500, -6500);
+  assert.ok(Math.abs(hole) < 1e-4, `hole ${hole}`);
+  assert.throws(() => ground.set(new Array(cols * rows).fill(NaN)), /no finite heights/);
+});

@@ -6,7 +6,6 @@
 // file and the city scripts into any page; guest.html runs it on a canvas of its own.
 
 const { THREE } = window.NYC;
-const { Fn, texture, uniform, vec3, vec4, dot, positionLocal, modelWorldMatrix, modelWorldMatrixInverse } = window.NYC.TSL;
 const { ClusteredLighting } = window.NYC.Addons;
 const { LightingSystem, lonLatToWorld } = window.NYC;
 const { buildCityGrid, buildBoroughs, buildLandmarks, buildCityBlocks, buildStreetDetails, buildRoadPaint } = window.NYC;
@@ -65,6 +64,7 @@ function makeGeoFrame() {
     lat0: LAT0,
     origin: worldToLonLat(0, 0), // 5th Ave & 42nd St
     waterY: WATER_Y,
+    height0: 0, // the ground's height at (lon0, lat0) once the host has set it (createGuest setGround)
     worldToEnu,
     worldToLonLat,
     lonLatToWorld
@@ -74,17 +74,19 @@ function makeGeoFrame() {
 // =====================================================================================================================
 // THE GROUND
 // The city is built on a plane (the road deck at y = 0); the real ground under it has hills, and a host's globe curves
-// away from the plane (d² / 2R: ~3 m 6 km from 42nd St, ~13 m at the island's tips). The host samples its own terrain
-// at the points samples() names (lon / lat on a grid over the island), and set() takes those heights (metres above the
-// host's ellipsoid): every vertex is then raised by the ground's height over height0, its height at (LON0, LAT0), less
-// the curve. The host puts the world frame's origin at height0. Only the drawing follows the ground: the simulation
-// (traffic, colliders, culling) stays on the plane.
+// away from the plane by d² / 2R (~4 m at the drawn island's ends, 7.1 km north and 6.5 km south of 42nd St). The host
+// samples its own terrain at the points samples() names (lon / lat on a grid over the island) and set() takes those
+// heights (metres above the host's ellipsoid, or any datum): every vertex is then raised by the ground's height over
+// height0, its height at (LON0, LAT0), less the curve, and the host puts the world frame's origin at height0. Only the
+// drawing follows the ground: the simulation (traffic, colliders, culling) and the shading's storeys, kerbs and
+// waterlines (NYC.deckPosition, tsl-materials.js) stay on the plane. Outside the bounds the ground holds its edge.
 // =====================================================================================================================
-// The island and its piers, with a margin (world metres)
+// The island and its piers as the guest draws them (extent 'manhattan': x -2256..2575, z -7111..6518), with a margin
 const GROUND_BOUNDS = { x0: -2700, x1: 2900, z0: -7400, z1: 6800 };
 
 function makeGround(frame, bounds = GROUND_BOUNDS) {
-  // The Earth's mean radius of curvature at LAT0 on WGS84 (√(MN)): within ~6 cm of either principal curve at 13 km
+  // The Earth's mean radius of curvature at LAT0 on WGS84 (√(MN)): its d² / 2R is within 0.4% (~2 cm at 7 km) of the
+  // drop along either principal direction
   const A = 6378137.0;
   const E2 = 6.69437999014e-3;
   const w = 1 - E2 * Math.sin((LAT0 * Math.PI) / 180) ** 2;
@@ -92,19 +94,20 @@ function makeGround(frame, bounds = GROUND_BOUNDS) {
   const curvature = 1 / (2 * radius);
   const tangent = frame.lonLatToWorld(LON0, LAT0);
 
-  let grid = null; // { x0, z0, dx, dz, cols, rows }
-  let offsets = null; // the ground over height0 at each grid point, rows along z
+  let pending = null; // the grid samples() last named: { x0, z0, dx, dz, cols, rows }
+  let grid = null; // the grid of the heights set() took
+  let offsets = null; // the ground over height0 at each of its points, rows along z
   let height0 = 0;
-  let maxOffset = 0;
+  let range = { min: 0, max: 0 }; // of the offsets
 
-  const bilinear = (values, x, z) => {
-    const fx = Math.min(Math.max((x - grid.x0) / grid.dx, 0), grid.cols - 1);
-    const fz = Math.min(Math.max((z - grid.z0) / grid.dz, 0), grid.rows - 1);
-    const i = Math.min(Math.floor(fx), grid.cols - 2);
-    const j = Math.min(Math.floor(fz), grid.rows - 2);
+  const bilinear = (g, values, x, z) => {
+    const fx = Math.min(Math.max((x - g.x0) / g.dx, 0), g.cols - 1);
+    const fz = Math.min(Math.max((z - g.z0) / g.dz, 0), g.rows - 1);
+    const i = Math.min(Math.floor(fx), g.cols - 2);
+    const j = Math.min(Math.floor(fz), g.rows - 2);
     const tx = fx - i;
     const tz = fz - j;
-    const at = (c, r) => values[r * grid.cols + c];
+    const at = (c, r) => values[r * g.cols + c];
     const a = at(i, j) + (at(i + 1, j) - at(i, j)) * tx;
     const b = at(i, j + 1) + (at(i + 1, j + 1) - at(i, j + 1)) * tx;
     return a + (b - a) * tz;
@@ -119,42 +122,128 @@ function makeGround(frame, bounds = GROUND_BOUNDS) {
     get offsets() { return offsets; },
     get height0() { return height0; },
     get on() { return offsets !== null; },
-    // The most any vertex moves, for bounding volumes
-    get maxOffset() { return maxOffset; },
+    // The least and most of the offsets (the curve aside)
+    get range() { return range; },
 
-    // The grid's points as lon / lat pairs (degrees), row by row along z, `spacing` metres apart or a little less
+    // The grid's points as lon / lat pairs (degrees), row by row along z, `spacing` metres apart or a little less.
+    // The ground in place stays until set() takes heights for these
     samples(spacing = 40) {
+      if (!(spacing > 0)) throw new Error('groundSamples: spacing must be positive');
       const cols = Math.ceil((bounds.x1 - bounds.x0) / spacing) + 1;
       const rows = Math.ceil((bounds.z1 - bounds.z0) / spacing) + 1;
-      grid = { x0: bounds.x0, z0: bounds.z0, dx: (bounds.x1 - bounds.x0) / (cols - 1), dz: (bounds.z1 - bounds.z0) / (rows - 1), cols, rows };
+      const g = { x0: bounds.x0, z0: bounds.z0, dx: (bounds.x1 - bounds.x0) / (cols - 1), dz: (bounds.z1 - bounds.z0) / (rows - 1), cols, rows };
       const lonLat = new Float64Array(cols * rows * 2);
       for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
-          const { lon, lat } = frame.worldToLonLat(grid.x0 + c * grid.dx, grid.z0 + r * grid.dz);
+          const { lon, lat } = frame.worldToLonLat(g.x0 + c * g.dx, g.z0 + r * g.dz);
           lonLat[(r * cols + c) * 2] = lon;
           lonLat[(r * cols + c) * 2 + 1] = lat;
         }
       }
-      offsets = null;
+      pending = g;
       return { lonLat, cols, rows };
     },
 
-    // Heights (m above the host's ellipsoid) at samples()' points, in its order
-    set(heights) {
-      if (!grid || heights.length !== grid.cols * grid.rows) throw new Error('setGround: heights must match groundSamples()');
-      height0 = bilinear(heights, tangent.x, tangent.z);
-      offsets = Float32Array.from(heights, (h) => h - height0);
-      maxOffset = 0;
-      for (const v of offsets) maxOffset = Math.max(maxOffset, Math.abs(v));
-      const corners = [[bounds.x0, bounds.z0], [bounds.x1, bounds.z0], [bounds.x0, bounds.z1], [bounds.x1, bounds.z1]];
-      maxOffset += Math.max(...corners.map(([x, z]) => curve(x, z)));
+    // Heights (m above the host's ellipsoid) at samples()' points, in its order. A height that isn't a finite number
+    // (a tile the host couldn't load) takes its neighbours'. seaLevel, the host's mean sea level in the same datum,
+    // keeps the ground from sinking below the city's own freeboard over its water (the deck stands 2.2 m over the
+    // harbour): a host's terrain over water is its sea surface or the river bed, where the piers and the shore stand
+    set(heights, { seaLevel } = {}) {
+      const g = pending;
+      if (!g || !heights || heights.length !== g.cols * g.rows) throw new Error('setGround: heights must match groundSamples()');
+      const h = Float64Array.from(heights, (v) => (v === null ? NaN : v));
+      if (seaLevel !== undefined) {
+        const floor = seaLevel - WATER_Y;
+        for (let i = 0; i < h.length; i++) if (h[i] < floor) h[i] = floor;
+      }
+      fillHoles(h, g.cols, g.rows);
+      grid = g;
+      height0 = bilinear(g, h, tangent.x, tangent.z);
+      offsets = Float32Array.from(h, (v) => v - height0);
+      let min = Infinity;
+      let max = -Infinity;
+      for (const v of offsets) {
+        min = Math.min(min, v);
+        max = Math.max(max, v);
+      }
+      range = { min, max };
     },
 
     // How far the ground at world (x, z) lifts what stands there (0 before set())
     offsetAt(x, z) {
-      return offsets ? bilinear(offsets, x, z) - curve(x, z) : 0;
+      return offsets ? bilinear(grid, offsets, x, z) - curve(x, z) : 0;
+    },
+
+    // The most anything within `reach` metres of world (x, z) is lifted or lowered, either way (for bounding volumes)
+    maxLiftNear(x, z, reach) {
+      if (!offsets) return 0;
+      const d = Math.hypot(x - tangent.x, z - tangent.z) + reach;
+      return Math.max(Math.abs(range.max), Math.abs(range.min - d * d * curvature));
     }
   };
+}
+
+// Fills each non-finite height from its finite neighbours, pass by pass inward from them
+function fillHoles(h, cols, rows) {
+  let holes = 0;
+  for (const v of h) if (!Number.isFinite(v)) holes++;
+  if (holes === h.length) throw new Error('setGround: no finite heights');
+  while (holes > 0) {
+    const fills = [];
+    for (let i = 0; i < h.length; i++) {
+      if (Number.isFinite(h[i])) continue;
+      const c = i % cols;
+      const r = (i - c) / cols;
+      let sum = 0;
+      let n = 0;
+      for (const [dc, dr] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+        const cc = c + dc;
+        const rr = r + dr;
+        if (cc < 0 || cc >= cols || rr < 0 || rr >= rows) continue;
+        const v = h[rr * cols + cc];
+        if (Number.isFinite(v)) {
+          sum += v;
+          n++;
+        }
+      }
+      if (n) fills.push([i, sum / n]);
+    }
+    for (const [i, v] of fills) h[i] = v;
+    holes -= fills.length;
+  }
+}
+
+// The ground's nodes, made once per page (TSL is only there in a browser) and shared by its guests: a vertex's lift is a
+// function of where it stands, the same for every guest of the same host. NYC.groundLift, the lift as a varying, is
+// what NYC.deckPosition (tsl-materials.js) takes off positionWorld to keep the shading's storeys on the road deck.
+let groundNodes = null;
+function getGroundNodes(tangent) {
+  if (groundNodes) return groundNodes;
+  const { Fn, texture, uniform, vec3, vec4, dot, positionLocal, modelWorldMatrix, modelWorldMatrixInverse } = window.NYC.TSL;
+  const map = texture(makeOffsetMap(new Float32Array(4), 2, 2));
+  const box = uniform(new THREE.Vector4(0, 0, 1, 1)); // x0, z0, 1 / (cols dx), 1 / (rows dz)
+  const texel = uniform(new THREE.Vector2(0.25, 0.25)); // half a texel: grid points sit on texel centres
+  const on = uniform(0);
+  const curvature = uniform(0);
+  const centre = uniform(new THREE.Vector2(tangent.x, tangent.z));
+  // offsetAt() on the GPU: the map's offset at world (x, z), less the curve
+  const offset = Fn(([xz]) => {
+    const uv = xz.sub(box.xy).mul(box.zw).add(texel);
+    const d = xz.sub(centre);
+    return map.sample(uv).level(0).r.mul(on).sub(dot(d, d).mul(curvature));
+  });
+  // A material's own position (or the vertex's, instanced), raised in world space and taken back to the object's.
+  // Sprites are placed by their positionNode (none: the object's origin) and billboarded after it
+  const lift = (material, node) => Fn(() => {
+    const p = node ?? (material.isSpriteNodeMaterial ? vec3(0) : positionLocal);
+    const xz = modelWorldMatrix.mul(vec4(p, 1.0)).xz;
+    return p.add(modelWorldMatrixInverse.mul(vec4(0.0, offset(xz), 0.0, 0.0)).xyz);
+  })();
+  // The lift at the vertex as it is drawn (the lift moves it straight up, so its x, z are those it was lifted at)
+  const varyingLift = offset(modelWorldMatrix.mul(vec4(positionLocal, 1.0)).xz).toVarying('vGroundLift');
+  groundNodes = { map, box, texel, on, curvature, lift };
+  window.NYC.groundLift = varyingLift;
+  return groundNodes;
 }
 
 // =====================================================================================================================
@@ -187,6 +276,11 @@ async function createGuest(options = {}) {
   renderer.shadowMap.enabled = options.shadows !== false;
   if (ClusteredLighting) renderer.lighting = new ClusteredLighting(256, 32, 28, 48);
   await renderer.init();
+
+  // The ground's nodes go in before the city is built: its materials' storeys and kerbs read NYC.groundLift
+  const frame = makeGeoFrame();
+  const ground = makeGround(frame);
+  const groundNodes = getGroundNodes(ground.tangent);
 
   const scene = new THREE.Scene();
   const lighting = new LightingSystem(scene, renderer, { sky: false, fog: false });
@@ -231,34 +325,19 @@ async function createGuest(options = {}) {
 
   // The ground (THE GROUND, above): every material's vertex stage adds offsetAt() at the vertex's world (x, z), read
   // from a half-float map of the offsets, less the curve. It goes in now, before the pipelines compile, with the map
-  // flat and switched off; setGround() then swaps the map and sets the uniforms, which recompiles nothing.
-  const frame = makeGeoFrame();
-  const ground = makeGround(frame);
-  const groundMap = texture(makeOffsetMap(new Float32Array(4), 2, 2));
-  const uGroundBox = uniform(new THREE.Vector4(0, 0, 1, 1)); // x0, z0, 1 / (cols dx), 1 / (rows dz)
-  const uGroundTexel = uniform(new THREE.Vector2(0.25, 0.25)); // half a texel: grid points sit on texel centres
-  const uGroundOn = uniform(0);
-  const uCurvature = uniform(0);
-  const uTangent = uniform(new THREE.Vector2(ground.tangent.x, ground.tangent.z));
-  const groundOffset = Fn(([xz]) => {
-    const uv = xz.sub(uGroundBox.xy).mul(uGroundBox.zw).add(uGroundTexel);
-    const d = xz.sub(uTangent);
-    return groundMap.sample(uv).level(0).r.mul(uGroundOn).sub(dot(d, d).mul(uCurvature));
-  });
-  // A material's own position (or the vertex's, instanced), raised in world space and taken back to the object's.
-  // Sprites are placed by their positionNode (none: the object's origin) and billboarded after it
-  const lifted = (material, node) => Fn(() => {
-    const p = node ?? (material.isSpriteNodeMaterial ? vec3(0) : positionLocal);
-    const xz = modelWorldMatrix.mul(vec4(p, 1.0)).xz;
-    return p.add(modelWorldMatrixInverse.mul(vec4(0.0, groundOffset(xz), 0.0, 0.0)).xyz);
-  })();
+  // flat and switched off; setGround() then swaps the map and sets the uniforms, which recompiles nothing. A lifted
+  // material's program differs from an unlifted one's with the same nodes, so its cache key says so
   const liftedMaterials = new Set();
   scene.traverse((o) => {
     for (const m of [].concat(o.material || [])) {
-      if (!m.isNodeMaterial || liftedMaterials.has(m)) continue;
+      if (!m.isNodeMaterial || m.vertexNode || liftedMaterials.has(m)) continue;
       liftedMaterials.add(m);
-      if (m.castShadowPositionNode) m.castShadowPositionNode = lifted(m, m.castShadowPositionNode);
-      m.positionNode = lifted(m, m.positionNode);
+      if (m.castShadowPositionNode) m.castShadowPositionNode = groundNodes.lift(m, m.castShadowPositionNode);
+      m.positionNode = groundNodes.lift(m, m.positionNode);
+      const key = m.customProgramCacheKey;
+      m.customProgramCacheKey = function () {
+        return `${key.call(this)}:ground`;
+      };
     }
   });
   // Lights (street and store lamps, the cars' pools) are placed on the CPU: lifted each frame. One whose y has changed
@@ -276,24 +355,28 @@ async function createGuest(options = {}) {
     o.position.y = u.groundBaseY + ground.offsetAt(_p.x, _p.z);
     u.groundY = o.position.y;
   };
-  // Bounding spheres, padded by the most anything moves, so frustum culling keeps what the ground raised into view
-  const padBounds = (pad) => {
-    const padded = new Set();
+  // Bounding spheres (a geometry's, or an instanced mesh's own), padded by the most the ground moves anything in them,
+  // so frustum culling keeps what it raised into view. A geometry shared by several meshes takes the largest pad
+  const _sphere = new THREE.Sphere();
+  const padBounds = () => {
+    scene.updateMatrixWorld();
+    const pads = new Map();
     scene.traverse((o) => {
-      if (!o.isMesh) return;
-      const g = o.geometry;
-      if (g && !padded.has(g)) {
-        padded.add(g);
-        if (!g.boundingSphere) g.computeBoundingSphere();
-        g.boundingSphere.radius += pad - (g.userData.groundPad || 0);
-        g.userData.groundPad = pad;
-      }
-      if ((o.isInstancedMesh || o.isBatchedMesh) && o.frustumCulled) {
-        if (!o.boundingSphere) o.computeBoundingSphere();
-        o.boundingSphere.radius += pad - (o.userData.groundPad || 0);
-        o.userData.groundPad = pad;
-      }
+      if (!o.isMesh || !o.frustumCulled) return;
+      const target = o.isInstancedMesh || o.isBatchedMesh ? o : o.geometry;
+      if (!target) return;
+      if (!target.boundingSphere) target.computeBoundingSphere();
+      _sphere.copy(target.boundingSphere);
+      _sphere.radius -= target.userData.groundPad || 0;
+      _sphere.applyMatrix4(o.matrixWorld);
+      const scale = o.matrixWorld.getMaxScaleOnAxis() || 1;
+      const pad = ground.maxLiftNear(_sphere.center.x, _sphere.center.z, _sphere.radius) / scale;
+      pads.set(target, Math.max(pads.get(target) || 0, pad));
     });
+    for (const [target, pad] of pads) {
+      target.boundingSphere.radius += pad - (target.userData.groundPad || 0);
+      target.userData.groundPad = pad;
+    }
   };
 
   // The grid's lon / lat for the host to sample its terrain at (makeGround samples())
@@ -301,20 +384,21 @@ async function createGuest(options = {}) {
     return ground.samples(spacing);
   }
 
-  // The host's terrain heights at groundSamples()' points (m above its ellipsoid). After it, frame.height0 is where
-  // the host puts the world frame's origin, and the city stands on the host's ground
-  function setGround(heights) {
-    ground.set(heights);
+  // The host's terrain heights at groundSamples()' points (m above its ellipsoid), and options.seaLevel, its mean sea
+  // level there (makeGround set()). After it, frame.height0 is where the host puts the world frame's origin, and the
+  // city stands on the host's ground
+  function setGround(heights, options) {
+    ground.set(heights, options);
     const { x0, z0, dx, dz, cols, rows } = ground.grid;
-    const old = groundMap.value;
-    groundMap.value = makeOffsetMap(ground.offsets, cols, rows);
+    const old = groundNodes.map.value;
+    groundNodes.map.value = makeOffsetMap(ground.offsets, cols, rows);
     old.dispose();
-    uGroundBox.value.set(x0, z0, 1 / (cols * dx), 1 / (rows * dz));
-    uGroundTexel.value.set(0.5 / cols, 0.5 / rows);
-    uGroundOn.value = 1;
-    uCurvature.value = ground.curvature;
+    groundNodes.box.value.set(x0, z0, 1 / (cols * dx), 1 / (rows * dz));
+    groundNodes.texel.value.set(0.5 / cols, 0.5 / rows);
+    groundNodes.on.value = 1;
+    groundNodes.curvature.value = ground.curvature;
     frame.height0 = ground.height0;
-    padBounds(ground.maxOffset);
+    padBounds();
   }
 
   const camera = new THREE.PerspectiveCamera(50, width / height, 0.35, 60000);

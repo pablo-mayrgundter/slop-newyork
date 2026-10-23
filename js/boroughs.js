@@ -1066,7 +1066,7 @@ function smooth01(t) {
 // Granite / concrete bulkheads: block courses, weathering and a dark algae band at the waterline
 function createBulkheadMaterial() {
   const mat = new THREE.MeshStandardNodeMaterial({ roughness: 0.86, metalness: 0.0 });
-  const wp = positionWorld;
+  const wp = window.NYC.deckPosition();
   const courseV = wp.y.div(0.85).toVar();
   const course = boxPulse(courseV, 0.0, 0.92, fwidth(courseV));
   const n = valueNoise(vec2(wp.x.add(wp.z).mul(0.09), wp.y.mul(0.6)));

@@ -2287,10 +2287,11 @@ function buildCityBlocks(scene) {
   const ironMat = new THREE.MeshStandardNodeMaterial({ color: 0x22252a, roughness: 0.45, metalness: 0.7 });
   ironMat.maskNode = Fn(() => {
     const across = positionGeometry.x.add(0.5).mul(3.4);
-    const storey = positionWorld.y.sub(3.55).div(3.45); // Landings from the 2nd floor up, see fireEscapes
+    const deckY = window.NYC.deckPosition().y;
+    const storey = deckY.sub(3.55).div(3.45); // Landings from the 2nd floor up, see fireEscapes
     const up = fract(storey).mul(3.45);
     const px = fwidth(across);
-    const py = fwidth(positionWorld.y);
+    const py = fwidth(deckY);
     const bar = (dist, halfWidth, footprint) => step(dist, max(footprint.mul(0.5), halfWidth));
     const deck = bar(abs(up.sub(0.06)), 0.06, py);
     const rails = max(bar(abs(up.sub(0.97)), 0.03, py), bar(abs(up.sub(0.5)), 0.02, py));
