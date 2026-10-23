@@ -3,7 +3,9 @@
 // Slop New York as a guest: the city drawn into another engine's frame, e.g. as a NetGL guest of a globe (Cesium) at
 // Manhattan's place on the Earth. No HUD, no player, no camera rig and no post-processing: the host owns the camera,
 // the sun, the canvas and the frame, and calls update() and render() from its own loop. js/guest-entry.mjs loads this
-// file and the city scripts into any page; guest.html runs it on a canvas of its own.
+// file and the city scripts into any page; guest.html runs it on a canvas of its own. A host that draws the city into
+// its own framebuffer, against its own depth (Cesium's scene.externalRenderers, js/guest-cesium.mjs), creates it with
+// composite and logDepth (THE HOST'S FRAME).
 
 const { THREE } = window.NYC;
 const { ClusteredLighting } = window.NYC.Addons;
@@ -174,6 +176,17 @@ function makeGround(frame, bounds = GROUND_BOUNDS) {
       return offsets ? bilinear(grid, offsets, x, z) - curve(x, z) : 0;
     },
 
+    // The least and most the ground lifts anything in the world box x0..x1, z0..z1 (0 and 0 before set()), the curve
+    // included: for the host's bounding volume of what the guest draws
+    liftRange(x0, x1, z0, z1) {
+      if (!offsets) return { min: 0, max: 0 };
+      const dx = Math.max(Math.abs(x0 - tangent.x), Math.abs(x1 - tangent.x));
+      const dz = Math.max(Math.abs(z0 - tangent.z), Math.abs(z1 - tangent.z));
+      const nx = tangent.x < x0 ? x0 - tangent.x : tangent.x > x1 ? tangent.x - x1 : 0;
+      const nz = tangent.z < z0 ? z0 - tangent.z : tangent.z > z1 ? tangent.z - z1 : 0;
+      return { min: range.min - (dx * dx + dz * dz) * curvature, max: range.max - (nx * nx + nz * nz) * curvature };
+    },
+
     // The most anything within `reach` metres of world (x, z) is lifted or lowered, either way (for bounding volumes)
     maxLiftNear(x, z, reach) {
       if (!offsets) return 0;
@@ -247,6 +260,133 @@ function getGroundNodes(tangent) {
 }
 
 // =====================================================================================================================
+// THE HOST'S FRAME
+// A host that composites the guest into its own frame (Cesium's scene.externalRenderers calls a renderer inside its
+// render pass, with the pass's framebuffer bound and its opaque geometry's depth in it) needs the guest to draw straight
+// into that framebuffer and to depth-test against what is there:
+//   composite   no clears, and no output render target. With outputColorSpace sRGB or a tone mapping, WebGPURenderer
+//               draws into a target of its own and copies it over the whole screen with no depth, which wipes the
+//               host's frame. So the renderer outputs in the working (linear) space with no tone mapping, and each
+//               material encodes sRGB itself through its outputNode (or not, setLinearOutput(true), for a host that
+//               renders in linear HDR and tone maps later)
+//   logDepth    the depth the host writes: Cesium's logarithmic depth, log2(w - near + 1) / log2(far - near + 1), w the
+//               fragment's distance along the view direction, from uniforms the host sets per frustum (setDepth).
+//               With setDepth(null) the materials write the standard depth of the camera's near and far. It goes in
+//               through each material's setupDepth, not its depthNode: a shadow pass takes the material's depthNode
+//               for its own (three's _getShadowNodes), and the shadow maps must keep the light camera's depth
+// Both go in with the ground's lift, in the one pass over the scene's materials before the pipelines compile.
+// =====================================================================================================================
+// The options with their defaults (THE GUEST, below)
+function guestOptions(options = {}) {
+  return {
+    extent: options.extent === 'all' ? 'all' : 'manhattan',
+    shadows: options.shadows !== false,
+    clearAlpha: options.clearAlpha ?? 0,
+    pixelRatio: options.pixelRatio || 1,
+    composite: options.composite === true,
+    logDepth: options.logDepth === true
+  };
+}
+
+// The renderer for a compositing host: no clears, and output with no render target of its own
+function setCompositeOutput(renderer) {
+  renderer.autoClear = false;
+  renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = THREE.NoToneMapping;
+}
+
+// Each node material in the scene, once: the ground's lift (lift(material), for those that don't place their own
+// vertices), the output encoding (output(outputNode) → outputNode) and the depth (setupDepth, the material's method).
+// A material's program then differs from one with the same nodes without these, so its cache key says which it has.
+// Returns how many materials it saw
+function prepareMaterials(scene, { lift = null, output = null, setupDepth = null } = {}) {
+  const seen = new Set();
+  scene.traverse((o) => {
+    for (const m of [].concat(o.material || [])) {
+      if (!m || !m.isNodeMaterial || seen.has(m)) continue;
+      seen.add(m);
+      const tags = [];
+      if (lift && !m.vertexNode) {
+        lift(m);
+        tags.push('ground');
+      }
+      if (output) {
+        m.outputNode = output(m.outputNode);
+        tags.push('composite');
+      }
+      if (setupDepth) {
+        m.setupDepth = setupDepth;
+        tags.push('logdepth');
+      }
+      if (!tags.length) continue;
+      const key = m.customProgramCacheKey;
+      const suffix = tags.join(':');
+      m.customProgramCacheKey = function () {
+        return `${key.call(this)}:${suffix}`;
+      };
+    }
+  });
+  return seen.size;
+}
+
+// The outputNode for composite: sRGB encoded (or linear while `linear` is 1), with no tone mapping
+function makeCompositeNodes() {
+  const { uniform, output, renderOutput, mix } = window.NYC.TSL;
+  const linear = uniform(0);
+  const encode = (node) => {
+    const color = node || output;
+    return mix(renderOutput(color, THREE.NoToneMapping, THREE.SRGBColorSpace), color, linear);
+  };
+  return { linear, encode };
+}
+
+// The setupDepth for logDepth: the host's log depth while `on` is 1, else the standard depth of the camera's near / far
+function makeLogDepthNodes() {
+  const { uniform, positionView, log2, max, float, mix, depth, viewZToPerspectiveDepth, cameraNear, cameraFar } = window.NYC.TSL;
+  const on = uniform(0);
+  const near = uniform(1);
+  const oneOverLog2 = uniform(1); // 1 / log2(far - near + 1)
+  const w = positionView.z.negate();
+  const logDepth = log2(max(w.sub(near).add(1.0), float(1.0))).mul(oneOverLog2);
+  const standard = viewZToPerspectiveDepth(positionView.z, cameraNear, cameraFar);
+  const node = mix(standard, logDepth, on);
+  const setupDepth = function () {
+    depth.assign(node).toStack();
+  };
+  return { on, near, oneOverLog2, setupDepth };
+}
+
+// The host's camera on the guest's: its world matrix and projection (column-major arrays, as three's and Cesium's),
+// and the projection's near and far. fov and aspect are read back from a symmetric projection, so a later
+// updateProjectionMatrix() (the shadow cascades fit to near / far) reproduces it; near and far too when they're not
+// given, though from p[10] and p[14] they're ill-conditioned once far / near is large (Cesium's log depth: ~1e7)
+function applyView(camera, { matrixWorld, projectionMatrix, near, far }) {
+  camera.matrixAutoUpdate = false;
+  camera.matrixWorldAutoUpdate = false;
+  camera.matrixWorld.fromArray(matrixWorld);
+  camera.matrixWorld.decompose(camera.position, camera.quaternion, camera.scale);
+  camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+  const p = projectionMatrix;
+  camera.fov = (2 * Math.atan(1 / p[5]) * 180) / Math.PI;
+  camera.aspect = p[5] / p[0];
+  camera.near = Number.isFinite(near) ? near : p[14] / (p[10] - 1);
+  camera.far = Number.isFinite(far) ? far : p[14] / (p[10] + 1);
+  camera.projectionMatrix.fromArray(p);
+  camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
+}
+
+// What the guest draws in the world frame ({ min, max } of a box, `box` from the flat scene), raised and lowered by
+// the ground and padded by `pad` metres: what a host bounds the guest with
+function liftBounds(box, ground, pad = 10) {
+  const { min, max } = box;
+  const lift = ground.liftRange(min.x, max.x, min.z, max.z);
+  return {
+    min: { x: min.x - pad, y: min.y + Math.min(0, lift.min) - pad, z: min.z - pad },
+    max: { x: max.x + pad, y: max.y + Math.max(0, lift.max) + pad, z: max.z + pad }
+  };
+}
+
+// =====================================================================================================================
 // THE GUEST
 // options:
 //   canvas, context   the canvas and WebGL2 context to draw with (a NetGL recorder context, say); omitted, a canvas of
@@ -256,11 +396,15 @@ function getGroundNodes(tangent) {
 //                     a host that draws the ground and water around the island; 'all' keeps the whole 1:1 region
 //   shadows           sun shadow cascades (default true)
 //   clearAlpha        the alpha of the guest's clears (default 0: transparent where it draws nothing)
+//   composite         for a host that draws the guest into its own framebuffer (default false): no clears, no output
+//                     render target, no tone mapping, each material encoding sRGB (THE HOST'S FRAME)
+//   logDepth          write the host's logarithmic depth, from setDepth() (default false; THE HOST'S FRAME)
 // =====================================================================================================================
 async function createGuest(options = {}) {
   const canvas = options.canvas;
   const width = options.width || (canvas && canvas.width) || 800;
   const height = options.height || (canvas && canvas.height) || 600;
+  const opts = guestOptions(options);
 
   const renderer = new THREE.WebGPURenderer({
     canvas,
@@ -270,10 +414,11 @@ async function createGuest(options = {}) {
     alpha: true,
     reversedDepthBuffer: false // its EXT_clip_control call bypasses a NetGL recorder (an extension-object method)
   });
-  renderer.setPixelRatio(options.pixelRatio || 1);
+  renderer.setPixelRatio(opts.pixelRatio);
   renderer.setSize(width, height, false);
-  renderer.setClearColor(0x000000, options.clearAlpha ?? 0);
-  renderer.shadowMap.enabled = options.shadows !== false;
+  renderer.setClearColor(0x000000, opts.clearAlpha);
+  renderer.shadowMap.enabled = opts.shadows;
+  if (opts.composite) setCompositeOutput(renderer);
   if (ClusteredLighting) renderer.lighting = new ClusteredLighting(256, 32, 28, 48);
   await renderer.init();
 
@@ -309,7 +454,7 @@ async function createGuest(options = {}) {
 
   // Left out before the culling set-up below, which would otherwise chunk their props and give their buildings shadow
   // stand-ins (at the scene's top level, drawn whatever their group's visibility)
-  if (options.extent !== 'all') {
+  if (opts.extent !== 'all') {
     for (const name of ['Boroughs', 'HarborWater']) {
       const o = scene.getObjectByName(name);
       if (o) o.removeFromParent();
@@ -325,20 +470,17 @@ async function createGuest(options = {}) {
 
   // The ground (THE GROUND, above): every material's vertex stage adds offsetAt() at the vertex's world (x, z), read
   // from a half-float map of the offsets, less the curve. It goes in now, before the pipelines compile, with the map
-  // flat and switched off; setGround() then swaps the map and sets the uniforms, which recompiles nothing. A lifted
-  // material's program differs from an unlifted one's with the same nodes, so its cache key says so
-  const liftedMaterials = new Set();
-  scene.traverse((o) => {
-    for (const m of [].concat(o.material || [])) {
-      if (!m.isNodeMaterial || m.vertexNode || liftedMaterials.has(m)) continue;
-      liftedMaterials.add(m);
+  // flat and switched off; setGround() then swaps the map and sets the uniforms, which recompiles nothing. With it, in
+  // the same pass, composite's output encoding and logDepth's depth (THE HOST'S FRAME)
+  const compositeNodes = opts.composite ? makeCompositeNodes() : null;
+  const logDepthNodes = opts.logDepth ? makeLogDepthNodes() : null;
+  prepareMaterials(scene, {
+    lift: (m) => {
       if (m.castShadowPositionNode) m.castShadowPositionNode = groundNodes.lift(m, m.castShadowPositionNode);
       m.positionNode = groundNodes.lift(m, m.positionNode);
-      const key = m.customProgramCacheKey;
-      m.customProgramCacheKey = function () {
-        return `${key.call(this)}:ground`;
-      };
-    }
+    },
+    output: compositeNodes && compositeNodes.encode,
+    setupDepth: logDepthNodes && logDepthNodes.setupDepth
   });
   // Lamps (street and store lights, the cars' pools) are placed on the CPU: lifted each frame. One whose y has changed
   // since (a car's lamp, re-placed every frame) is lifted from its new y. Only point and spot lights: the sun (a
@@ -410,22 +552,42 @@ async function createGuest(options = {}) {
 
   let elapsed = 0;
 
-  // The host's camera in the world frame: its world matrix and projection (column-major arrays, as three's and
-  // Cesium's). fov, aspect, near and far are read back from a symmetric projection, so a later
-  // updateProjectionMatrix() (the shadow cascades fit to near / far) reproduces it.
-  function setView({ matrixWorld, projectionMatrix }) {
-    camera.matrixAutoUpdate = false;
-    camera.matrixWorldAutoUpdate = false;
-    camera.matrixWorld.fromArray(matrixWorld);
-    camera.matrixWorld.decompose(camera.position, camera.quaternion, camera.scale);
-    camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
-    const p = projectionMatrix;
-    camera.fov = (2 * Math.atan(1 / p[5]) * 180) / Math.PI;
-    camera.aspect = p[5] / p[0];
-    camera.near = p[14] / (p[10] - 1);
-    camera.far = p[14] / (p[10] + 1);
-    camera.projectionMatrix.fromArray(p);
-    camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
+  // The host's camera in the world frame (applyView, THE HOST'S FRAME): { matrixWorld, projectionMatrix }, column-major,
+  // and optionally near and far, which a host with them in hand (Cesium's frustum) should pass
+  function setView(view) {
+    applyView(camera, view);
+  }
+
+  // logDepth's uniforms for this frustum: { near, oneOverLog2FarDepthFromNearPlusOne } (Cesium's names, its
+  // ExternalRenderer parameters), or null for the standard depth. False if the guest wasn't made with logDepth
+  function setDepth(params) {
+    if (!logDepthNodes) return false;
+    if (params) {
+      logDepthNodes.near.value = params.near;
+      logDepthNodes.oneOverLog2.value = params.oneOverLog2FarDepthFromNearPlusOne;
+      logDepthNodes.on.value = 1;
+    } else {
+      logDepthNodes.on.value = 0;
+    }
+    return true;
+  }
+
+  // composite: true for linear output (a host rendering in HDR, tone mapping later), false for sRGB (the default).
+  // False if the guest wasn't made with composite
+  function setLinearOutput(linear) {
+    if (!compositeNodes) return false;
+    compositeNodes.linear.value = linear ? 1 : 0;
+    return true;
+  }
+
+  // What the guest draws, in the world frame: the flat scene's box (taken once), raised and lowered by the ground
+  let flatBox = null;
+  function bounds() {
+    if (!flatBox) {
+      scene.updateMatrixWorld();
+      flatBox = new THREE.Box3().setFromObject(scene);
+    }
+    return liftBounds(flatBox, ground);
   }
 
   // One simulation step (seconds): signals, traffic, pedestrians, the tram, building LODs, prop culling, shadow reach
@@ -496,7 +658,13 @@ async function createGuest(options = {}) {
     groundSamples,
     setGround,
     groundOffsetAt: (x, z) => ground.offsetAt(x, z),
+    composite: opts.composite,
+    logDepth: opts.logDepth,
     setView,
+    setDepth,
+    setLinearOutput,
+    bounds,
+    // The direction to the sun in the world frame, y up: any { x, y, z } (a THREE.Vector3, a Cesium Cartesian3)
     setSun: (dir) => lighting.setSunDirection(dir),
     update,
     render,
@@ -516,5 +684,5 @@ function makeOffsetMap(values, cols, rows) {
   return map;
 }
 
-Object.assign(window.NYC, { createGuest, makeGeoFrame, makeGround });
+Object.assign(window.NYC, { createGuest, makeGeoFrame, makeGround, guestOptions, prepareMaterials, applyView, liftBounds });
 })();
