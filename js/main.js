@@ -50,11 +50,13 @@ async function initApp() {
     loadingStatus.textContent = `Initializing Three.js r${THREE.REVISION} WebGPURenderer & TSL Shaders...`;
   }
 
-  // 1. Initialize Three.js WebGPURenderer with 32-bit float reversedDepthBuffer
+  // 1. Initialize Three.js WebGPURenderer with 32-bit float reversedDepthBuffer. ?webgl forces the WebGL2 backend, the
+  //    fallback of browsers without WebGPU (and the backend the guest, js/guest.js, always runs), in one that has it
   const renderer = new THREE.WebGPURenderer({
     antialias: true,
     powerPreference: 'high-performance',
-    reversedDepthBuffer: true
+    reversedDepthBuffer: true,
+    forceWebGL: new URLSearchParams(location.search).has('webgl')
   });
   renderer.setPixelRatio(1.0);
   renderer.setSize(window.innerWidth, window.innerHeight);
