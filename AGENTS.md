@@ -80,6 +80,25 @@ code.
     flat ground layers where the ground bends (THE GROUND,
     `drapeGroundLayers`). A new big flat layer at the street goes under
     `ManhattanCityGrid` or into `DRAPE_ROOTS`, or it cuts through hills.
+  - Test the drape on real heights, not only the demo hill: real terrain
+    bends everywhere, and the default 4 mm detail splits the island to
+    metres (minutes, gigabytes). A host from afar passes `drape`
+    (`{ tolerance, minEdge, maxCells, maxTriangles }`). Slivers (corners
+    in a line, as the deck's triangulation leaves along straight shores)
+    never ask for a split themselves: split for themselves they never
+    settled, and the splitting looped for ever on real terrain.
+  - What an option leaves out isn't built (`extent: 'manhattan'`: no
+    boroughs; `shadows: false`: no shadow stand-ins; `crowds: false`: no
+    pedestrians). `guest.stats.build` has each build step's ms and
+    `guest.stats.drape` the last drape's.
+  - A builder's scratch arrays outlive the build when anything made in
+    the same function scope does (a material's TSL `Fn`, a returned
+    `update()`): V8 keeps the whole scope. The waterfront's accumulators
+    (city-grid.js `addMesh`) and the facade boxes (buildings.js
+    `buckets`) held ~130 MB of plain arrays that way; they're emptied once
+    copied into their geometry. Find such things with CDP
+    `HeapProfiler.startSampling` / `stopSampling` over a load: it reports
+    the live heap by allocation site.
   - A host that draws the guest into its own framebuffer (Cesium's
     `scene.externalRenderers`, js/guest-cesium.mjs
     `cesiumExternalRenderer`) needs `composite: true` and, under log

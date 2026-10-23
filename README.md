@@ -16,7 +16,8 @@ recorder, say) from a camera and sun you set each frame. [`guest.html`](guest.ht
 
 ```js
 const { createNYCGuest } = await import('./js/guest-entry.mjs');
-const guest = await createNYCGuest({ canvas, context, width, height }); // extent: 'manhattan' (default) or 'all'
+const guest = await createNYCGuest({ canvas, context, width, height }); // extent: 'manhattan' (default) or 'all';
+                                                                          // shadows, lights, crowds (default true)
 await guest.compile();
 // each frame
 guest.setView({ matrixWorld, projectionMatrix }); // the camera in the city's frame, column-major
@@ -66,6 +67,28 @@ The lift moves vertices, and the city's flat layers at the street (the road deck
 sidewalks' slabs, the paint) are partly built from long triangles, which would cut straight through a hill. So
 `setGround` also splits those layers where the ground bends away from them, until it is within 4 mm of every triangle:
 flat ground costs nothing, the demo hill ~0.7 M more triangles and a few seconds of main thread on each `setGround`.
+
+That detail is for a smooth made-up hill. Real terrain bends a little everywhere: on Terrarium heights over the island
+the road deck alone split to 2.9 M triangles in 140 s, and the whole drape ran for minutes and gigabytes. A host that
+sees the city from afar passes a coarser drape, `createNYCGuest({ drape })` or `setGround(heights, { seaLevel, drape })`:
+
+```js
+guest.setGround(heights, { seaLevel, drape: { tolerance: 0.1, minEdge: 8, maxTriangles: 1.5e6 } });
+guest.stats.drape;   // { layers, split, capped, vertices: [before, after], triangles: [before, after], ms }
+```
+
+`tolerance` (m, default 0.004), `minEdge` (m, default 2: no edge is split shorter), `maxCells` (default 4: no edge
+longer than this many ground cells) and `maxTriangles` (default unbounded: each layer splits within its share of it,
+by area, stopping before a pass that would pass it, so it stays watertight). With the drape above, the same heights
+on a 100 m grid take 1.6 M triangles and ~5 s on a slow CPU.
+
+### What the guest doesn't build
+
+What a guest leaves out isn't built: `extent: 'manhattan'` builds none of the other boroughs (their ~117k buildings,
+the bridges and islands), `shadows: false` no shadow stand-ins, and `crowds: false` no pedestrians (they're never drawn
+on WebGL2, but walk and are skinned every frame, about 5 ms of `update()` at street level; the cars then meet nobody at
+the crosswalks). `guest.stats.build` has each build step's milliseconds (`cityGrid`, `cityBlocks`, `streetDetails`,
+`traffic`, ... and `compile`).
 
 ### Measuring it
 

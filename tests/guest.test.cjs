@@ -199,16 +199,29 @@ const plain = (o) => JSON.parse(JSON.stringify(o));
 test('composite and logDepth are off by default, and the other options keep their defaults', () => {
   const { guestOptions } = loadGuest();
   assert.deepEqual(plain(guestOptions()), {
-    extent: 'manhattan', shadows: true, clearAlpha: 0, pixelRatio: 1, composite: false, logDepth: false, lights: true
+    extent: 'manhattan', shadows: true, clearAlpha: 0, pixelRatio: 1, composite: false, logDepth: false, lights: true, crowds: true, drape: null
   });
-  assert.deepEqual(plain(guestOptions({ extent: 'all', shadows: false, clearAlpha: 1, pixelRatio: 2, composite: true, logDepth: true, lights: false })), {
-    extent: 'all', shadows: false, clearAlpha: 1, pixelRatio: 2, composite: true, logDepth: true, lights: false
+  assert.deepEqual(plain(guestOptions({ extent: 'all', shadows: false, clearAlpha: 1, pixelRatio: 2, composite: true, logDepth: true, lights: false, crowds: false, drape: { tolerance: 0.1 } })), {
+    extent: 'all', shadows: false, clearAlpha: 1, pixelRatio: 2, composite: true, logDepth: true, lights: false, crowds: false, drape: { tolerance: 0.1 }
   });
   // Only true turns them on
   const o = guestOptions({ composite: 1, logDepth: 'yes', extent: 'brooklyn' });
   assert.equal(o.composite, false);
   assert.equal(o.logDepth, false);
   assert.equal(o.extent, 'manhattan');
+});
+
+test('what a guest leaves out isn\'t built: the other boroughs, the crowds, the shadow stand-ins', () => {
+  const guest = readFileSync(join(__dirname, '../js/guest.js'), 'utf8');
+  assert.match(guest, /const boroughs = opts\.extent === 'all' \? step\('boroughs'/);
+  assert.match(guest, /\{ pedestrians: opts\.crowds \}/);
+  assert.match(guest, /setupSceneCulling\(scene, cullingRoots, opts\.shadows \? lighting\.sunLight\.shadow : null\)/);
+  const traffic = readFileSync(join(__dirname, '../js/traffic.js'), 'utf8');
+  assert.match(traffic, /function createTrafficSystem\(scene, sidewalks, obstacles, \{ pedestrians = true \} = \{\}\)/);
+  // No crowd: none made, and every use of it guarded (the per-person ones run only for people there are)
+  assert.match(traffic, /const pedCrowd = numPeds \? new PersonCrowd\(numPeds\) : null;/);
+  for (const use of traffic.match(/^.*pedCrowd\.(?:begin|end|meshes).*$/gm)) assert.match(use, /if \(pedCrowd\)/);
+  assert.doesNotMatch(traffic, /i < NUM_PEDS/);
 });
 
 test('the material pass sees each node material once, and keys its program by what it added', () => {
@@ -352,4 +365,37 @@ test('the ground layers split until no edge spans more than the detail across th
   assert.equal(tris.filter((t) => t.some((p) => p[1] === 9)).length, 1);
   // nothing to split: null
   assert.equal(subdivideTriangles({ attrs: { position: { array: [0, 0, 0, 0, 0, 5, 5, 0, 0], itemSize: 3 } }, index: null, world: [0, 0, 0, 0, 0, 5, 5, 0, 0] }, 20), null);
+});
+
+test('a triangle budget stops the splitting before a pass would pass it, and the mesh stays watertight', () => {
+  const { subdivideTriangles } = loadGuest();
+  const P = [[0, 0, 0], [0, 0, 60], [100, 0, 60], [100, 0, 0]];
+  const position = P.flat();
+  const mesh = { attrs: { position: { array: position, itemSize: 3 } }, index: [0, 1, 2, 0, 2, 3], world: position };
+  const free = subdivideTriangles(mesh, 2);
+  assert.equal(free.capped, false);
+  const capped = subdivideTriangles(mesh, 2, undefined, 200);
+  assert.equal(capped.capped, true);
+  assert.ok(capped.triangles <= 200 && capped.triangles > 50 && capped.triangles < free.triangles, `${capped.triangles}`);
+  const pos = capped.attrs.position;
+  const key = (i) => `${pos[3 * i]},${pos[3 * i + 2]}`;
+  const edges = new Map();
+  let area = 0;
+  for (let t = 0; t < capped.index.length; t += 3) {
+    const [a, b, c] = [capped.index[t], capped.index[t + 1], capped.index[t + 2]];
+    area += ((pos[3 * b + 2] - pos[3 * a + 2]) * (pos[3 * c] - pos[3 * a]) - (pos[3 * b] - pos[3 * a]) * (pos[3 * c + 2] - pos[3 * a + 2])) / 2;
+    for (const [p, q] of [[a, b], [b, c], [c, a]]) {
+      const k = [key(p), key(q)].sort().join('|');
+      edges.set(k, (edges.get(k) || 0) + 1);
+    }
+  }
+  assert.ok(Math.abs(area - 6000) < 1e-6);
+  let boundary = 0;
+  for (const [k, n] of edges) {
+    if (n === 1) {
+      const [p, q] = k.split('|').map((s) => s.split(',').map(Number));
+      boundary += Math.hypot(p[0] - q[0], p[1] - q[1]);
+    }
+  }
+  assert.ok(Math.abs(boundary - 320) < 1e-6, 'no T-junctions');
 });

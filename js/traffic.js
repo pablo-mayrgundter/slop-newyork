@@ -79,7 +79,10 @@ function createBusDestinationTexture() {
 
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 
-function createTrafficSystem(scene, sidewalks, obstacles) {
+// options: pedestrians (default true): false builds no crowd (no rigs, no meshes, no walking), for a guest that doesn't
+// draw people (js/guest.js crowds: false); the vehicles then meet nobody on the crosswalks
+function createTrafficSystem(scene, sidewalks, obstacles, { pedestrians = true } = {}) {
+  const numPeds = pedestrians ? NUM_PEDS : 0;
   const group = new THREE.Group();
   group.name = 'ManhattanTrafficAndPedestrians';
 
@@ -310,13 +313,13 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
   // =========================================================================
   // One instanced draw per level of detail; every pedestrian has a PersonRig that plants its footsteps on the
   // sidewalk (no sliding), with their own build, height, sex, hair, clothes and gait
-  const pedCrowd = new PersonCrowd(NUM_PEDS);
+  const pedCrowd = numPeds ? new PersonCrowd(numPeds) : null;
   const hash = (i, salt) => {
     const v = Math.sin(i * 12.9898 + salt * 78.233) * 43758.5453;
     return v - Math.floor(v);
   };
   const peds = [];
-  for (let i = 0; i < NUM_PEDS; i++) {
+  for (let i = 0; i < numPeds; i++) {
     const female = hash(i, 1) < 0.48;
     const hairRoll = hash(i, 2);
     peds.push({
@@ -350,7 +353,7 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
       })
     });
   }
-  group.add(...pedCrowd.meshes);
+  if (pedCrowd) group.add(...pedCrowd.meshes);
 
   // Add vehicle contact shadows last + pre-allocated Clustered SpotLight / PointLight pools
   group.add(carShadowInst, busShadowInst);
@@ -1935,8 +1938,8 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
     walkedNodes.length = 0;
     gatherCurbs();
     let pedBudget = jump ? Infinity : 6;
-    pedCrowd.begin();
-    for (let i = 0; i < NUM_PEDS; i++) {
+    if (pedCrowd) pedCrowd.begin();
+    for (let i = 0; i < numPeds; i++) {
       const p = peds[i];
       const d = p.placed ? Math.hypot(p.x - focusX, p.z - focusZ) : Infinity;
       if (!p.placed || (jump && d > NEAR_RADIUS)) {
@@ -1948,7 +1951,7 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
       walk(p, dt);
       renderPed(p, dt);
     }
-    pedCrowd.end();
+    if (pedCrowd) pedCrowd.end();
 
     // 3. Collision sparks, including the player's own impacts against buildings
     if (playerEntity && playerEntity.lastCollisionSpark) {

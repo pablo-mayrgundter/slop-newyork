@@ -2116,6 +2116,8 @@ function buildCityBlocks(scene) {
     inst.castShadow = true;
     inst.receiveShadow = true;
     group.add(inst);
+    // Copied into the instances: let the boxes go (update() and updateLights() keep this scope, and with it them)
+    items.length = 0;
   });
 
   // Billboards: one merged mesh per poster theme
