@@ -199,10 +199,10 @@ const plain = (o) => JSON.parse(JSON.stringify(o));
 test('composite and logDepth are off by default, and the other options keep their defaults', () => {
   const { guestOptions } = loadGuest();
   assert.deepEqual(plain(guestOptions()), {
-    extent: 'manhattan', shadows: true, clearAlpha: 0, pixelRatio: 1, composite: false, logDepth: false
+    extent: 'manhattan', shadows: true, clearAlpha: 0, pixelRatio: 1, composite: false, logDepth: false, lights: true
   });
-  assert.deepEqual(plain(guestOptions({ extent: 'all', shadows: false, clearAlpha: 1, pixelRatio: 2, composite: true, logDepth: true })), {
-    extent: 'all', shadows: false, clearAlpha: 1, pixelRatio: 2, composite: true, logDepth: true
+  assert.deepEqual(plain(guestOptions({ extent: 'all', shadows: false, clearAlpha: 1, pixelRatio: 2, composite: true, logDepth: true, lights: false })), {
+    extent: 'all', shadows: false, clearAlpha: 1, pixelRatio: 2, composite: true, logDepth: true, lights: false
   });
   // Only true turns them on
   const o = guestOptions({ composite: 1, logDepth: 'yes', extent: 'brooklyn' });

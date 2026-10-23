@@ -284,7 +284,8 @@ function guestOptions(options = {}) {
     clearAlpha: options.clearAlpha ?? 0,
     pixelRatio: options.pixelRatio || 1,
     composite: options.composite === true,
-    logDepth: options.logDepth === true
+    logDepth: options.logDepth === true,
+    lights: options.lights !== false
   };
 }
 
@@ -406,6 +407,8 @@ function liftBounds(box, ground, pad = 10) {
 //   composite         for a host that draws the guest into its own framebuffer (default false): no clears, no output
 //                     render target, no tone mapping, each material encoding sRGB (THE HOST'S FRAME)
 //   logDepth          write the host's logarithmic depth, from setDepth() (default false; THE HOST'S FRAME)
+//   lights            the street, store and car lamps, clustered (default true). false leaves them out, and with them
+//                     ClusteredLighting's work each frame (on WebGL2 a transform-feedback pass over every cluster)
 // =====================================================================================================================
 async function createGuest(options = {}) {
   const canvas = options.canvas;
@@ -426,7 +429,7 @@ async function createGuest(options = {}) {
   renderer.setClearColor(0x000000, opts.clearAlpha);
   renderer.shadowMap.enabled = opts.shadows;
   if (opts.composite) setCompositeOutput(renderer);
-  if (ClusteredLighting) renderer.lighting = new ClusteredLighting(256, 32, 28, 48);
+  if (ClusteredLighting && opts.lights) renderer.lighting = new ClusteredLighting(256, 32, 28, 48);
   await renderer.init();
 
   // The ground's nodes go in before the city is built: its materials' storeys and kerbs read NYC.groundLift
@@ -458,6 +461,14 @@ async function createGuest(options = {}) {
     if (o.name === 'PeopleNear' || o.name === 'PeopleFar') crowdMeshes.push(o);
   });
   for (const mesh of crowdMeshes) mesh.removeFromParent();
+  // lights: false leaves out the lamps (point and spot lights): unclustered, every material would shade all of them
+  if (!opts.lights) {
+    const lamps = [];
+    scene.traverse((o) => {
+      if (o.isPointLight || o.isSpotLight) lamps.push(o);
+    });
+    for (const lamp of lamps) lamp.removeFromParent();
+  }
 
   // Left out before the culling set-up below, which would otherwise chunk their props and give their buildings shadow
   // stand-ins (at the scene's top level, drawn whatever their group's visibility)
