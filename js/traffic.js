@@ -434,10 +434,18 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections, {
     halfW: 0.86, halfL: 2.18 };
   const nearEdges = [];
   const nearSignals = [];
-  const pedestrianSystem = pedestrians ? createPedestrianSystem(network, {
-    player, nearEdges, nearSignals, mayCross, walkOn, visible, nearView
-  }) : { peds: [], meshes: [], update() {} };
-  group.add(...pedestrianSystem.meshes);
+  let pedestrianSystem;
+  if (pedestrians) {
+    pedestrianSystem = createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCross, walkOn, visible, nearView });
+  } else {
+    // No crowd: the nodes' crosswalks and curbs stay empty (pedestrian-system.js fills them), which the vehicles read
+    for (const n of network.nodes) {
+      n.walkers = [];
+      n.curb = [];
+    }
+    pedestrianSystem = { peds: [], meshes: [], update() {} };
+  }
+  if (pedestrianSystem.meshes.length) group.add(...pedestrianSystem.meshes); // add() with nothing logs an error
 
   // Add vehicle contact shadows last + pre-allocated Clustered SpotLight / PointLight pools
   group.add(carShadowInst, busShadowInst);

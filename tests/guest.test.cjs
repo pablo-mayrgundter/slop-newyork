@@ -196,7 +196,10 @@ test('what a guest leaves out isn\'t built: the other boroughs, the crowds, the 
   const traffic = readFileSync(join(__dirname, '../js/traffic.js'), 'utf8');
   assert.match(traffic, /function createTrafficSystem\(scene, sidewalks, obstacles, signalIntersections, \{ pedestrians = true \} = \{\}\)/);
   // No crowd: no pedestrian system (pedestrian-system.js), and one that walks no one in its place
-  assert.match(traffic, /const pedestrianSystem = pedestrians \? createPedestrianSystem\(network, \{[^}]*\}\) : \{ peds: \[\], meshes: \[\], update\(\) \{\} \};/);
+  assert.match(traffic, /if \(pedestrians\) \{\n\s*pedestrianSystem = createPedestrianSystem\(network,/);
+  assert.match(traffic, /pedestrianSystem = \{ peds: \[\], meshes: \[\], update\(\) \{\} \};/);
+  // the vehicles read every node's crosswalk walkers, which the pedestrian system would have set up
+  assert.match(traffic, /n\.walkers = \[\];\n\s*n\.curb = \[\];/);
 });
 
 test('the material pass sees each node material once, and keys its program by what it added', () => {
