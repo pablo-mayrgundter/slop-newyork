@@ -16,6 +16,7 @@ class Node {
   get x() { return new Node(this.values[0]); }
   get y() { return new Node(this.values[1]); }
   get z() { return new Node(this.values[2]); }
+  add(v) { return binary(this, v, (a, b) => a + b); }
   sub(v) { return binary(this, v, (a, b) => a - b); }
   mul(v) { return binary(this, v, (a, b) => a * b); }
   negate() { return this.mul(-1); }
@@ -124,4 +125,24 @@ test('world projection includes object rotation and the inverse scale used for n
   const length = Math.hypot(0.5, 1 / 3, 2);
   [0.5, 1 / 3, 2].forEach((v, i) => close(scaled.normal.values[i], v / length));
   assert.equal(scalar(scaled.axis), 0, 'the dominant world normal component must be selected after inverse scaling');
+});
+
+test('surveyed storefronts remain glazed above the sidewalk while cut-off storeys stay solid', () => {
+  const masks = source.slice(source.indexOf('let partial =', projectionStart), source.indexOf('const solid =', projectionStart));
+  const evaluate = vm.runInNewContext(`(function (vCoord, fromTop, wallH, floorHeight, gridV, footprintLocal) {
+    const boxLocal = true, wall = float(1);
+    ${masks}
+    return partial;
+  })`, {
+    float: v => new Node(v), floor: unary(Math.floor),
+    step: (edge, v) => binary(edge, v, (a, b) => b < a ? 0 : 1)
+  });
+  const partial = (y, bottom, height, footprintLocal) => scalar(evaluate(
+    new Node(y), new Node(bottom + height - y), new Node(height), new Node(3.5), new Node(y / 3.5), footprintLocal));
+
+  assert.equal(partial(2, 0.22, 10, true), 0, 'the sidewalk offset must not blank the ground floor');
+  assert.equal(partial(5, 0.22, 10, true), 0, 'complete upper storeys retain their windows');
+  assert.equal(partial(8, 0.22, 10, true), 1, 'the roof still masks an incomplete top storey');
+  assert.equal(partial(6, 5.4, 10, false), 1, 'a raised authored box masks its incomplete bottom storey');
+  assert.equal(partial(8, 5.4, 10, false), 0, 'complete storeys in raised boxes remain glazed');
 });

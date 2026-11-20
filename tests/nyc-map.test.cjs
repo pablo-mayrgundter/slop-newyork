@@ -2,15 +2,39 @@ const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const test = require('node:test');
-const vm = require('node:vm');
+const { loadModule } = require('./helpers/module.cjs');
 
 const source = readFileSync(join(__dirname, '../js/nyc-map.js'), 'utf8');
 
+test('surveyed building courtyards remain holes in the map footprint layer', () => {
+  class Path2D {
+    rings = [];
+    moveTo(x, z) { this.rings.push([[x, z]]); }
+    lineTo(x, z) { this.rings.at(-1).push([x, z]); }
+    closePath() {}
+  }
+  const { footprintLayers } = loadModule(source + '\nexport { footprintLayers };', {
+    globals: { Path2D },
+    imports: { './nyc-geodata.js': { GEO: {} }, './city-config.js': { ROADS: [] } }
+  });
+  const ring = (x0, z0, x1, z1) => [{ x: x0, z: z0 }, { x: x1, z: z0 }, { x: x1, z: z1 }, { x: x0, z: z1 }];
+  const layers = footprintLayers([{ footprints: [{ h: 120, pts: ring(0, 0, 20, 20), holes: [ring(5, 5, 15, 15)] }] }]);
+  const [tile] = layers.tones[2].tiles.values();
+  const areas = tile.path.rings.map((r) => r.reduce((sum, p, i) => {
+    const q = r[(i + 1) % r.length];
+    return sum + p[0] * q[1] - q[0] * p[1];
+  }, 0) / 2);
+  assert.deepEqual(areas, [400, -100], 'opposite winding cuts the courtyard out under the nonzero fill rule');
+});
+
 for (const [width, height, dpr] of [[500, 300, 1], [320, 180, 1.5], [1920, 1080, 2]]) {
   test(`map clicks match rendered world positions at ${width}x${height}, DPR ${dpr}`, () => {
-    const window = { NYC: { GEO: {}, ROADS: [] }, innerWidth: width, innerHeight: height, devicePixelRatio: dpr };
-    vm.runInNewContext(source, { window, performance: { now: () => 0 } });
-    const map = Object.create(window.NYC.NYCMapSystem.prototype);
+    const window = { innerWidth: width, innerHeight: height, devicePixelRatio: dpr };
+    const { NYCMapSystem } = loadModule(source, {
+      globals: { window, performance: { now: () => 0 } },
+      imports: { './nyc-geodata.js': { GEO: {} }, './city-config.js': { ROADS: [] } }
+    });
+    const map = Object.create(NYCMapSystem.prototype);
     // Capture the production render viewport; drawing primitives are irrelevant to coordinate conversion.
     const context = new Proxy({}, { get: () => () => {} });
     let view;
@@ -74,10 +98,11 @@ function mapHarness() {
   const controls = eventTarget();
   const wrapper = { classList: classList() };
   const zoomIn = eventTarget(), zoomOut = eventTarget();
+  const hoverInfo = { textContent: '' };
   const elements = {
     'fullmap-canvas': canvas, 'fullmap-canvas-wrap': wrapper,
     'fullmap-modal': { classList: classList() },
-    'map-zoom-in': zoomIn, 'map-zoom-out': zoomOut
+    'map-zoom-in': zoomIn, 'map-zoom-out': zoomOut, 'fullmap-hover-info': hoverInfo
   };
   const document = {
     ...eventTarget(), hidden: false,
@@ -91,16 +116,19 @@ function mapHarness() {
     captured.delete(id);
     canvas.dispatch('lostpointercapture', { pointerId: id });
   };
-  window.NYC = {
-    GEO: { frame: {} }, ROADS: [], BLOCKS: [], NYC_LANDMARKS: [],
+  const config = {
+    ROADS: [], BLOCKS: [], NYC_LANDMARKS: [],
     ISLAND_BOUNDS: { minX: -10000, maxX: 10000, minZ: -10000, maxZ: 10000 },
     getIslandBoundsAtZ: () => ({ westX: -10000, eastX: 10000 }),
     getLocationLabel: (x, z) => `${x}, ${z}`,
     isTypingInField: () => false
   };
-  vm.runInNewContext(source, { window, document });
+  const { NYCMapSystem } = loadModule(source, {
+    globals: { window, document },
+    imports: { './nyc-geodata.js': { GEO: { frame: {} } }, './city-config.js': config }
+  });
   const teleports = [], toggles = [];
-  const map = new window.NYC.NYCMapSystem({
+  const map = new NYCMapSystem({
     controllerManager: { getActiveEntity: () => ({ position: { x: 1000, z: 2000 } }) },
     onTeleport: (x, z) => teleports.push([x, z]),
     onToggle: (open) => toggles.push(open)
@@ -110,7 +138,7 @@ function mapHarness() {
   map.viewZoom = 1;
   map.toggleFullMap(true);
   return {
-    map, canvas, controls, wrapper, window, document, captured, teleports, toggles, zoomIn, zoomOut,
+    map, canvas, controls, wrapper, window, document, captured, teleports, toggles, zoomIn, zoomOut, hoverInfo,
     pointer(target, type, id, x = 110, y = 120, pointerType = 'touch', button = 0) {
       const event = { pointerId: id, clientX: x, clientY: y, pointerType, button, preventDefault() {} };
       (captured.has(id) ? canvas : target).dispatch(type, event);
@@ -189,10 +217,9 @@ test('a pointer released outside the map or far from its start does not teleport
 test('mouse hover and zoom buttons remain available without a pan', () => {
   const h = mapHarness();
   h.pointer(h.canvas, 'pointermove', 1, 120, 130, 'mouse');
-  assert.equal(h.map.hoverWorld.x, 1010);
-  assert.equal(h.map.hoverWorld.z, 2010);
+  assert.equal(h.hoverInfo.textContent, '1010, 2010 · Click to teleport here');
   h.pointer(h.canvas, 'pointermove', 2, 180, 130);
-  assert.equal(h.map.hoverWorld.x, 1010, 'untracked touch does not update hover');
+  assert.equal(h.hoverInfo.textContent, '1010, 2010 · Click to teleport here', 'untracked touch does not update hover');
   h.zoomIn.dispatch('click');
   assert.equal(h.map.viewZoom, 1.45);
   h.zoomOut.dispatch('click');

@@ -2,38 +2,22 @@ const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const test = require('node:test');
-const vm = require('node:vm');
+const { loadGround } = require('./helpers/city.cjs');
 
-// js/ground.js, shared by the guest and the app (index.html?ground=demo), without a GPU
+// js/ground.js, shared by the guest and the app (index.html?ground=demo), without a GPU (tests/helpers/city.cjs)
 const read = (file) => readFileSync(join(__dirname, '..', file), 'utf8');
-
-class Matrix4 {
-  constructor() { this.elements = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]; }
-  set(...n) {
-    for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) this.elements[c * 4 + r] = n[r * 4 + c];
-    return this;
-  }
-}
-
-function loadGround() {
-  const LL = read('js/boroughs.js').match(/function LL\(lon, lat\) \{[^]*?\n\}/)[0];
-  const window = { NYC: { THREE: { Matrix4 }, TSL: {}, Addons: {} } };
-  const context = vm.createContext({ window, Math, performance });
-  vm.runInContext(`${LL}; window.NYC.lonLatToWorld = LL;`, context);
-  vm.runInContext(read('js/ground.js'), context);
-  return window.NYC;
-}
 
 test('the app has no ground without ?ground=demo, and loading ground.js touches neither three nor the TSL', () => {
   const NYC = loadGround();
   for (const mode of [null, '', 'flat', 'DEMO', 'Terrain']) assert.equal(NYC.createAppGround(mode), null);
   assert.equal(NYC.createAppGround(new URLSearchParams('hill=150&spread=600')), null);
-  assert.equal(NYC.groundLift, undefined, 'deckPosition stays positionWorld');
+  assert.equal(NYC.groundLifts.length, 0, 'deckPosition stays positionWorld');
 });
 
 test('main.js reaches the ground only through createAppGround, each use guarded', () => {
   const main = read('js/main.js');
-  assert.match(main, /const appGround = window\.NYC\.createAppGround\(new URLSearchParams\(location\.search\)\);/);
+  assert.match(main, /^import \{ createAppGround \} from '\.\/ground\.js';$/m);
+  assert.match(main, /const appGround = createAppGround\(new URLSearchParams\(location\.search\)\);/);
   // the terrain's heights arrive while the city builds: attach() is awaited before the shaders compile
   assert.match(main, /if \(appGround\) await appGround\.attach\(scene, markInit\);/);
   const uses = main.match(/^.*appGround\b.*$/gm).filter((l) => !/const appGround =|^\s*\/\//.test(l));

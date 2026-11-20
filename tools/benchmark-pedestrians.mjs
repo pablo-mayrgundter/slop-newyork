@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
-import vm from 'node:vm';
+import { loadModule } from '../tests/helpers/module.cjs';
 
 const corePath = process.argv[2] || process.env.THREE_CORE_PATH;
 if (!corePath) throw new Error('Pass the path to an existing Three.js build/three.core.js, or set THREE_CORE_PATH.');
@@ -17,15 +17,19 @@ const alwaysSolve = source.replaceAll('if (updatePose) this.solve();', 'this.sol
 assert.notEqual(alwaysSolve, source, 'Expected deferred pose solves in PersonRig.update');
 
 function rigClass(code) {
-  const window = { NYC: { THREE, TSL: {}, Addons: {} } };
-  vm.runInNewContext(code, { window, Math });
-  return window.NYC.PersonRig;
+  return loadModule(code, {
+    globals: { Math },
+    imports: {
+      'three/webgpu': THREE,
+      'three/tsl': {},
+      'three/addons/utils/BufferGeometryUtils.js': {}
+    }
+  }).PersonRig;
 }
 const BaselineRig = rigClass(alwaysSolve);
 const DeferredRig = rigClass(source);
 const ground = (_owner, x) => x % 30 < 15 ? 0.22 : 0;
-const diagnosticKeys = new Set(['pose', 'reachError', 'stanceReachError']);
-const gaitState = (rig) => JSON.stringify(rig, (key, value) => diagnosticKeys.has(key) ? undefined : value);
+const gaitState = (rig) => JSON.stringify(rig, (key, value) => key === 'pose' ? undefined : value);
 const equalPose = (a, b, message) => assert.ok(a.length === b.length && a.every((value, i) => Number.isFinite(value) && Object.is(value, b[i])), message);
 
 // Hidden stretches include walking, stopping, turning, jumping and relocation. On returning to view, the full
