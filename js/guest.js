@@ -1,19 +1,25 @@
-(function () {
 // js/guest.js
 // Slop New York as a guest: the city drawn into another engine's frame, e.g. as a NetGL guest of a globe (Cesium) at
 // Manhattan's place on the Earth. No HUD, no player, no camera rig and no post-processing: the host owns the camera,
-// the sun, the canvas and the frame, and calls update() and render() from its own loop. js/guest-entry.mjs loads this
-// file and the city scripts into any page; guest.html runs it on a canvas of its own. A host that draws the city into
+// the sun, the canvas and the frame, and calls update() and render() from its own loop. js/guest-entry.mjs is its entry
+// for any page (it imports this module and, through it, the city's); guest.html runs it on a canvas of its own. A host that draws the city into
 // its own framebuffer, against its own depth (Cesium's scene.externalRenderers, js/guest-cesium.mjs), creates it with
 // composite and logDepth (THE HOST'S FRAME). The frame on the Earth and the ground (the host's heights, the lift, the
 // drape) are js/ground.js's, which the app shares for index.html?ground=demo.
 
-const { THREE } = window.NYC;
-const { ClusteredLighting } = window.NYC.Addons;
-const { LightingSystem, createGroundDrape, prepareMaterials } = window.NYC;
-const { buildCityGrid, buildBoroughs, buildLandmarks, buildCityBlocks, buildStreetDetails, buildRoadPaint } = window.NYC;
-const { createTrafficSystem, createHighwayTraffic } = window.NYC;
-const { setupSceneCulling, updateSceneCulling } = window.NYC;
+import * as THREE from 'three/webgpu';
+import { uniform, output, renderOutput, mix, positionView, log2, max, float, depth, viewZToPerspectiveDepth, cameraNear, cameraFar } from 'three/tsl';
+import { ClusteredLighting } from 'three/addons/lighting/ClusteredLighting.js';
+import { LightingSystem } from './lighting.js';
+import { createGroundDrape, prepareMaterials } from './ground.js';
+import { buildCityGrid } from './city-grid.js';
+import { buildBoroughs } from './boroughs.js';
+import { buildLandmarks } from './landmarks.js';
+import { buildCityBlocks } from './buildings.js';
+import { buildStreetDetails } from './street-details.js';
+import { createTrafficSystem, createHighwayTraffic } from './traffic.js';
+import { buildRoadPaint } from './road-paint.js';
+import { setupSceneCulling, updateSceneCulling } from './scene-culling.js';
 
 // =====================================================================================================================
 // THE HOST'S FRAME
@@ -56,7 +62,6 @@ function setCompositeOutput(renderer) {
 
 // The outputNode for composite: sRGB encoded (or linear while `linear` is 1), with no tone mapping
 function makeCompositeNodes() {
-  const { uniform, output, renderOutput, mix } = window.NYC.TSL;
   const linear = uniform(0);
   const encode = (node) => {
     const color = node || output;
@@ -67,7 +72,6 @@ function makeCompositeNodes() {
 
 // The setupDepth for logDepth: the host's log depth while `on` is 1, else the standard depth of the camera's near / far
 function makeLogDepthNodes() {
-  const { uniform, positionView, log2, max, float, mix, depth, viewZToPerspectiveDepth, cameraNear, cameraFar } = window.NYC.TSL;
   const on = uniform(0);
   const near = uniform(1);
   const oneOverLog2 = uniform(1); // 1 / log2(far - near + 1)
@@ -156,8 +160,8 @@ async function createGuest(options = {}) {
   if (ClusteredLighting && opts.lights) renderer.lighting = new ClusteredLighting(256, 32, 28, 48);
   await renderer.init();
 
-  // The ground (js/ground.js, THE DRAPE) goes in before the city is built: its materials' storeys and kerbs read
-  // NYC.groundLift
+  // The ground (js/ground.js, THE DRAPE) goes in before the city is built: its materials' storeys and kerbs read its
+  // lift (tsl-materials.js deckPosition)
   const drape = createGroundDrape({ drape: opts.drape });
   const { frame, ground } = drape;
 
@@ -177,16 +181,16 @@ async function createGuest(options = {}) {
   // and islands are most of buildBoroughs' time, and its tram's update would keep them all in memory)
   const boroughs = opts.extent === 'all' ? step('boroughs', () => buildBoroughs(scene, { sidewalks: cityGrid.sidewalks })) : null;
   const { colliders: landmarkColliders } = step('landmarks', () => buildLandmarks(scene));
-  const cityBlocks = step('cityBlocks', () => buildCityBlocks(scene));
+  const cityBlocks = step('cityBlocks', () => buildCityBlocks(scene, landmarkColliders));
   const allColliders = [...landmarkColliders, ...cityBlocks.colliders, ...(boroughs ? boroughs.colliders : []), ...(cityGrid.colliders || [])];
-  const streetDetails = step('streetDetails', () => buildStreetDetails(scene));
+  const streetDetails = step('streetDetails', () => buildStreetDetails(scene, allColliders));
   const trafficSystem = step('traffic', () => createTrafficSystem(scene, cityGrid.sidewalks, [
     ...cityGrid.footprints,
     ...streetDetails.footprints,
-    ...allColliders.filter((c) => !c.obb)
-  ], { pedestrians: opts.crowds }));
+    ...allColliders.filter((c) => !c.obb && (c.minY ?? 0) < 3.5)
+  ], streetDetails.signalIntersections, { pedestrians: opts.crowds }));
   const highwayTraffic = step('highwayTraffic', () => createHighwayTraffic(scene, cityGrid.highwayLanes));
-  step('roadPaint', () => buildRoadPaint(scene, trafficSystem.network));
+  step('roadPaint', () => buildRoadPaint(scene, trafficSystem.network, cityGrid.roadPaint));
   // The crowds skin each person from a storage buffer read by index, which the WebGL2 backend can't do (it smears them
   // into a sheet): the pedestrians still walk and keep traffic waiting, undrawn
   const crowdMeshes = [];
@@ -216,13 +220,11 @@ async function createGuest(options = {}) {
   // instanced slabs baked before the culling set-up
   step('groundLayers', () => drape.takeLayers(scene));
 
-  const cullingRoots = ['ManhattanCityGrid', 'ManhattanCityBlocks', 'ManhattanStreetDetails', 'ManhattanLandmarks', 'Boroughs']
+  const cullingRoots = ['ManhattanCityGrid', 'ManhattanCityBlocks', 'ManhattanStreetDetails', 'ManhattanLandmarks', 'Boroughs', 'RoadMarkings']
     .map((name) => scene.getObjectByName(name))
     .filter(Boolean);
   // The shadow stand-ins only the cascades draw: none without shadows
   step('culling', () => setupSceneCulling(scene, cullingRoots, opts.shadows ? lighting.sunLight.shadow : null));
-  // Unlike main.js, instance matrices stay instanced vertex attributes: its swap to storage attributes spares WebGPU's
-  // uniform buffers, and on the WebGL2 backend instance matrices are vertex attributes already
 
   // The ground's lift (js/ground.js, THE DRAPE) goes into every material now, before the pipelines compile, and with it,
   // in the same pass, composite's output encoding and logDepth's depth (THE HOST'S FRAME). The guest draws with no MRT,
@@ -375,5 +377,4 @@ async function createGuest(options = {}) {
   };
 }
 
-Object.assign(window.NYC, { createGuest, guestOptions, applyView, liftBounds });
-})();
+export { createGuest, guestOptions, applyView, liftBounds };

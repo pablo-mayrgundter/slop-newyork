@@ -1,14 +1,13 @@
 // js/guest-cesium.mjs with a stub Cesium: the city's bounding volume and sun on the globe, and the ExternalRenderer's
 // per-frustum and per-frame work, without a GPU or a Cesium build
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import vm from 'node:vm';
+import { createRequire } from 'node:module';
 import {
   cityModelMatrix, cityBoundingVolume, cityBoundingSphere, sunFromCesium, cesiumScreenFramebuffer, cesiumExternalRenderer
 } from '../js/guest-cesium.mjs';
 
-const read = (file) => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+const { loadGround } = createRequire(import.meta.url)('./helpers/city.cjs');
 
 // ---- A stub of the few Cesium functions the helpers use: column-major, indexable matrices, WGS84 ENU ----
 class Cartesian3 {
@@ -107,22 +106,9 @@ const Cesium = {
   }
 };
 
-// The guest's frame, from js/ground.js and js/guest.js as they stand (as tests/guest.test.cjs loads it)
-class ThreeMatrix4 {
-  constructor() { this.elements = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]; }
-  set(...n) {
-    for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) this.elements[c * 4 + r] = n[r * 4 + c];
-    return this;
-  }
-}
+// The guest's frame, from js/ground.js as it stands (tests/helpers/city.cjs, as tests/guest.test.cjs loads it)
 function loadFrame() {
-  const LL = read('js/boroughs.js').match(/function LL\(lon, lat\) \{[^]*?\n\}/)[0];
-  const window = { NYC: { THREE: { Matrix4: ThreeMatrix4 }, TSL: {}, Addons: {} } };
-  const context = vm.createContext({ window, Math });
-  vm.runInContext(`${LL}; window.NYC.lonLatToWorld = LL;`, context);
-  vm.runInContext(read('js/ground.js'), context);
-  vm.runInContext(read('js/guest.js'), context);
-  return window.NYC.makeGeoFrame();
+  return loadGround().makeGeoFrame();
 }
 
 const BOX = { min: { x: -2300, y: -12, z: -7200 }, max: { x: 2600, y: 560, z: 6600 } };

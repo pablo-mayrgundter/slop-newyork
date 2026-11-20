@@ -37,8 +37,9 @@ guest.render();
 
 The city's frame is metres, x = grid east, y = up, z = grid south, centred on 5th Ave & 42nd St. `guest.frame.worldToEnu`
 takes it to east-north-up metres about `guest.frame.lon0, lat0` on WGS84, and `guest.frame.waterY` is the harbour's
-surface (mean sea level) under the flat city. three.js comes from the page's import map (as in `index.html`), or pass
-`three: { THREE, TSL, Addons }`.
+surface (mean sea level) under the flat city. The city is native ES modules that import three.js by bare names, so the
+host's page maps `three`, `three/webgpu`, `three/tsl` and `three/addons/` in an import map of its own, to the three.js
+dev build `index.html` pins (another build may lack what the city uses).
 
 ### On the host's ground
 
@@ -172,8 +173,12 @@ sunFromCesium(guest, Cesium, p, modelMatrix);    // p.sunDirectionWC in the city
 The renderer's bounding volume follows the ground when `setGround` moves it. It assumes the pass's viewport starts at
 the origin (Cesium's does, outside VR), and resizes the guest to the pass.
 
+Bringing it to your own city? [PORTING.md](PORTING.md) maps out what's reusable, what reads replaceable data, and what's New York through and through.
+
+Explore other cities and community remixes in [Slop Cities](https://github.com/zz85/slop-cities).
+
 ## License and data
 
 The project code is available under the [MIT License](LICENSE).
 
-Geographic data: NYC Open Data and © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright) (ODbL). Third-party data and dependencies retain their respective licenses.
+Geographic data: NYC Open Data (including [building footprints and heights](https://data.cityofnewyork.us/City-Government/BUILDING/5zhs-2jue) and [tree locations](https://data.cityofnewyork.us/Environment/Forestry-Tree-Points/hn5i-inap)), [MTA subway entrances](https://data.ny.gov/Transportation/MTA-Subway-Entrances-and-Exits-2024/i9wp-a4ja), and © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright) (ODbL). Third-party data and dependencies retain their respective licenses.

@@ -21,7 +21,8 @@ code.
 | Working on | Read first |
 |---|---|
 | What the project is, the live demo | [README.md](./README.md) |
-| How the app boots: script order, the three.js import map, `window.NYC` | [index.html](./index.html) (`nycAppScripts`, the import map, the module script that fills `window.NYC`), then [js/main.js](./js/main.js) `initApp` |
+| How the app boots: the three.js import map, the module preloads, the one entry | [index.html](./index.html) (the import map, `modulepreload`s, `js/main.js`), then [js/main.js](./js/main.js) `initApp` |
+| Porting the city to another one (upstream's guide) | [PORTING.md](./PORTING.md) |
 | The city as a guest in another engine (a NetGL guest of a globe) | README [As a guest in another engine](./README.md#as-a-guest-in-another-engine); [js/guest.js](./js/guest.js) (its header, `THE HOST'S FRAME` and `THE GUEST`); [js/guest-entry.mjs](./js/guest-entry.mjs); [guest.html](./guest.html), its demo page |
 | The ground under the city (the frame on the Earth, heights, the lift, the drape, the lamps), shared by the guest and the app's `?ground=demo` and `?ground=terrain` | [js/ground.js](./js/ground.js): `THE FRAME ON THE EARTH`, `THE GROUND`, `THE DRAPE`, `THE DEMO GROUND`, `THE APP ON THE GROUND`; the real heights, [js/terrarium.mjs](./js/terrarium.mjs) |
 | The host side of the guest (recorder, replay, compositing) | [portal](https://github.com/pablo-mayrgundter/portal): its AGENTS.md and [portal-netgl DESIGN.md](https://github.com/pablo-mayrgundter/portal/blob/main/packages/portal-netgl/DESIGN.md) |
@@ -40,39 +41,52 @@ code.
 
 ## Working efficiently
 
-- **No build and no package.json.** The app is classic scripts, each an
-  IIFE that reads what it needs from `window.NYC` and adds its own
-  exports to it. index.html loads them in a fixed order
-  (`nycAppScripts`), after an import map that serves three.js dev from
-  jsDelivr (`cdn.jsdelivr.net/gh/mrdoob/three.js@dev/...`). To run it,
-  serve the repo root with any static server (e.g.
+- **No build and no package.json.** The app is native ES modules
+  (upstream's since 1f66530; before it, classic scripts sharing
+  `window.NYC`). index.html has an import map that pins three.js dev to
+  a commit on jsDelivr (`cdn.jsdelivr.net/gh/mrdoob/three.js@<commit>/...`),
+  a `modulepreload` for every module, and one entry, `js/main.js`. To
+  run it, serve the repo root with any static server (e.g.
   `python3 -m http.server 8000`) and open `/`.
-  - A new script goes into `nycAppScripts` at the point where what it
-    reads from `window.NYC` is already defined.
-- **Tests:** `node --test tests/*.cjs tests/*.mjs` (123 tests, about
+  - A new module that main.js reaches gets a `modulepreload` line in
+    index.html (`tests/boot.test.cjs` checks every static import of a
+    preloaded module is preloaded too). `js/terrarium.mjs`, imported
+    dynamically for `?ground=terrain` only, has none.
+  - `js/building-geodata.js` and `js/tree-geodata.js` fetch their
+    `.bin.gz` data next to themselves with top-level await.
+- **Tests:** `node --test tests/*.cjs tests/*.mjs` (283 tests, about
   45 s). Plain `node --test tests/` fails, so use the globs. The tests
-  run the scripts in `node:vm` with stubs for `window.NYC`, three.js
-  and the DOM, or parse index.html and the scripts as text. No GPU and
-  no three.js download are needed.
+  load a module's source in `node:vm` through `tests/helpers/module.cjs`
+  `loadModule`, with each import a stub, or parse index.html and the
+  modules as text. No GPU and no three.js download are needed.
+  `tests/helpers/city.cjs` loads ground.js and guest.js that way.
 - **The guest** (js/guest.js, js/guest-entry.mjs) builds the city
   without the HUD, the player, the camera rig, the sky, the fog or the
   post-processing, and draws it with a canvas and context the host
   hands it. The host sets the camera and the sun each frame and calls
   `update()` and `render()`.
-  - `guest-entry.mjs`'s `SCRIPTS` list must stay in step with
-    index.html's `nycAppScripts`, minus the app-only scripts
-    (controllers, touch-controls, cameras, nyc-map, post-processing,
-    main), then `guest.js`. `tests/guest.test.cjs` enforces it, so a
-    script added to index.html goes into `SCRIPTS` too, unless it's
-    app-only (then add it to the test's `APP_ONLY`).
+  - `guest-entry.mjs` imports `guest.js`, which builds the city as
+    main.js does: it imports the city's modules main.js imports, less
+    the app's own (controllers, touch and gamepad controls, cameras,
+    nyc-map, post-processing, audio). `tests/guest.test.cjs` enforces
+    it, so a builder main.js starts importing goes into guest.js too,
+    unless it's app-only (then add it to the test's `APP_ONLY`). When
+    main.js's build steps change (a builder's arguments, the culling
+    roots), change guest.js's to match.
+  - The host's page maps three.js's bare names (`three`,
+    `three/webgpu`, `three/tsl`, `three/addons/`) in an import map of
+    its own: the guest's modules import them. It should pin the commit
+    index.html pins (celestiary's `public/index.html` does), and move
+    with it.
   - The guest always runs on three's WebGL2 backend
     (`forceWebGL: true`), because NetGL records WebGL2.
   - The ground's code (the frame, `makeGround`, the lift, the drape, the
-    lamps' lift, the demo hill) is js/ground.js, a classic script that
-    both index.html and `SCRIPTS` load and that runs nothing at load
-    (tests load it in `node:vm` with a stub of three that has only
-    `Matrix4`: make any other three object on first use). guest.js and
-    main.js only call it: don't copy ground code into either.
+    lamps' lift, the demo hill) is js/ground.js, a module both main.js
+    and guest.js import, that runs nothing at load (tests load it with
+    a stub of three that has only `Matrix4`: make any other three object
+    on first use). guest.js and main.js only call it: don't copy ground
+    code into either. It hands its lift to tsl-materials.js
+    (`setGroundLift`), which `deckPosition()` takes off.
   - guest.html takes `?shadows=0` and `?extent=all` (the default,
     `manhattan`, leaves out the other boroughs and the harbour's water),
     `?lights=0` (no lamps, no ClusteredLighting), `?ground=demo`,
@@ -137,7 +151,7 @@ code.
   south (north is -z), origin at the centrelines of 5th Ave & 42nd St.
   It's the tangent plane at 40.75318°N, 73.98185°W on WGS84, turned
   29.02° with the street grid (tools/geo-base.mjs). `LL()` in
-  boroughs.js, exported as `window.NYC.lonLatToWorld`, is the lon/lat
+  boroughs.js, exported as `lonLatToWorld`, is the lon/lat
   to world map; guest.js's `makeGeoFrame()` inverts it and gives
   `worldToEnu`.
 - **js/nyc-geodata.js is generated** by tools/build-geodata.mjs from
@@ -145,15 +159,16 @@ code.
   tools/build-geodata.mjs`). Never edit it by hand: change the tool or
   its data and rebuild.
 - **The WebGL2 fallback.** Browsers without WebGPU, and the guest, run
-  WebGPURenderer's WebGL2 backend. Two WebGPU-only paths broke there and
-  are now guarded on `renderer.backend.isWebGPUBackend`:
-  - storage instance matrices (main.js's swap to
-    `StorageInstancedBufferAttribute`) drew the towers as streaks, so
-    on WebGL2 the instance matrices stay vertex attributes;
+  WebGPURenderer's WebGL2 backend. Two WebGPU-only paths broke there:
+  - storage instance matrices (main.js's old swap to
+    `StorageInstancedBufferAttribute`) drew the towers as streaks;
+    upstream now binds instance matrices as vertex attributes on both
+    backends (21f71bd), so there's no swap left;
   - the crowds read a storage buffer by index
     (`attributeArray(...).element(i)` in pedestrians.js) and smeared
     into a sheet, so on WebGL2 the `PeopleNear` and `PeopleFar` meshes
-    are removed (the people still walk, undrawn).
+    are removed (the people still walk, undrawn), in main.js and
+    guest.js, guarded on `renderer.backend.isWebGPUBackend` in main.js.
 
   Anything new that uses storage buffers, compute or `attributeArray`
   random access needs a WebGL2 path or a guard on
@@ -272,10 +287,12 @@ code.
     `renderer._nodes.nodeFrame` `time` and `lastTime` (three's `time`
     node, the water and the clouds), and gate the loop's callback
     (wrap `WebGPURenderer.prototype.setAnimationLoop`, hooked from a
-    setter on `window.NYC`) to run N frames with synthetic timestamps.
+    with an init script before the page loads) to run N frames with
+    synthetic timestamps.
     Two builds then render bit for bit alike. `page.goto` with
     `waitUntil: 'commit'`: the load event waits on the city's build.
-  - The app is ready when `window.__NYC_APP.ready` is true. The guest
+  - The app is ready when `window.__NYC_APP.ready` is true (a handle
+    the fork adds in main.js; upstream has none). The guest
     page exposes the guest as `window.__NYC_GUEST`. Read state with
     `page.evaluate` rather than inferring it from pixels.
   - three's own rAF loop (its `Animation`) advances the node frame and

@@ -2,40 +2,28 @@ const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const test = require('node:test');
-const vm = require('node:vm');
+const { loadGuest } = require('./helpers/city.cjs');
 
 const read = (file) => readFileSync(join(__dirname, '..', file), 'utf8');
 
-// The app's own scripts, which the guest leaves out (js/guest-entry.mjs)
-const APP_ONLY = ['controllers.js', 'touch-controls.js', 'cameras.js', 'nyc-map.js', 'post-processing.js', 'main.js'];
+// The app's own modules, which the guest leaves out: the player's controllers and input, the camera rig, the map, the
+// post-processing, the audio and main.js itself (js/guest.js builds the city as main.js does, without them)
+const APP_ONLY = /^\.\/(?:controllers|touch-controls|gamepad-controls|cameras|nyc-map|post-processing|audio-[\w-]+|ground)\.js$/;
+const importsOf = (file) => [...read(file).matchAll(/^import\s+[^;]*?\s+from\s+'(\.\/[\w-]+\.js)'\s*;/gm)].map((m) => m[1]);
 
-test('the guest loads the city scripts index.html loads, in its order, without the app\'s own, then guest.js', () => {
-  const html = read('index.html');
-  const appScripts = [...html.match(/const nycAppScripts = [^]*?\]/)[0].matchAll(/'\.\/js\/([\w-]+\.js)'/g)].map((m) => m[1]);
-  const entry = read('js/guest-entry.mjs');
-  const guestScripts = [...entry.match(/const SCRIPTS = \[([^]*?)\]/)[1].matchAll(/'([\w-]+\.js)'/g)].map((m) => m[1]);
-  assert.ok(appScripts.length > 10);
-  assert.deepEqual(guestScripts, [...appScripts.filter((s) => !APP_ONLY.includes(s)), 'guest.js']);
+test('the guest builds the city from the modules main.js does, without the app\'s own, and the entry imports the guest', () => {
+  const app = importsOf('js/main.js').filter((m) => !APP_ONLY.test(m));
+  const guest = importsOf('js/guest.js').filter((m) => !['./ground.js', './lighting.js'].includes(m));
+  assert.ok(app.length > 8);
+  assert.deepEqual([...guest].sort(), [...app].filter((m) => m !== './lighting.js' && m !== './city-config.js').sort());
+  assert.match(read('js/guest-entry.mjs'), /^import \{ createGuest \} from '\.\/guest\.js';$/m);
+  // the city's modules, the guest's and its entry reach nothing through window
+  for (const f of ['js/guest.js', 'js/ground.js', 'js/guest-entry.mjs']) assert.doesNotMatch(read(f), /window\.NYC/, f);
 });
 
-// A Matrix4 with three's set() (row-major arguments) and column-major elements
-class Matrix4 {
-  constructor() { this.elements = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]; }
-  set(...n) {
-    for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) this.elements[c * 4 + r] = n[r * 4 + c];
-    return this;
-  }
-}
-
 function loadFrame() {
-  // boroughs.js's lon/lat → world map, as it stands there
-  const LL = read('js/boroughs.js').match(/function LL\(lon, lat\) \{[^]*?\n\}/)[0];
-  const window = { NYC: { THREE: { Matrix4 }, TSL: {}, Addons: {} } };
-  const context = vm.createContext({ window, Math });
-  vm.runInContext(`${LL}; window.NYC.lonLatToWorld = LL;`, context);
-  vm.runInContext(read('js/ground.js'), context);
-  vm.runInContext(read('js/guest.js'), context);
-  return { frame: window.NYC.makeGeoFrame(), LL: window.NYC.lonLatToWorld };
+  const NYC = loadGuest();
+  return { frame: NYC.makeGeoFrame(), LL: NYC.lonLatToWorld };
 }
 
 const enuOf = (m, x, y, z) => {
@@ -88,15 +76,10 @@ test('worldToEnu agrees with metres along the ground', () => {
 
 // THE GROUND (js/guest.js makeGround): the host's terrain heights at the guest's sample points, as lifts
 function loadGround(spacing = 100) {
-  const LL = read('js/boroughs.js').match(/function LL\(lon, lat\) \{[^]*?\n\}/)[0];
-  const window = { NYC: { THREE: { Matrix4 }, TSL: {}, Addons: {} } };
-  const context = vm.createContext({ window, Math });
-  vm.runInContext(`${LL}; window.NYC.lonLatToWorld = LL;`, context);
-  vm.runInContext(read('js/ground.js'), context);
-  vm.runInContext(read('js/guest.js'), context);
-  const frame = window.NYC.makeGeoFrame();
-  const ground = window.NYC.makeGround(frame);
-  return { frame, ground, LL: window.NYC.lonLatToWorld, ...ground.samples(spacing) };
+  const NYC = loadGuest();
+  const frame = NYC.makeGeoFrame();
+  const ground = NYC.makeGround(frame);
+  return { frame, ground, LL: NYC.lonLatToWorld, ...ground.samples(spacing) };
 }
 
 // The grid's points in world (x, z), in samples()' order
@@ -188,15 +171,6 @@ test('set fills heights the host had none for, and holds the city\'s freeboard o
 });
 
 // THE HOST'S FRAME (js/guest.js): the options, the material pass, the view and the bounds, without a GPU
-function loadGuest() {
-  const LL = read('js/boroughs.js').match(/function LL\(lon, lat\) \{[^]*?\n\}/)[0];
-  const window = { NYC: { THREE: { Matrix4 }, TSL: {}, Addons: {} } };
-  const context = vm.createContext({ window, Math });
-  vm.runInContext(`${LL}; window.NYC.lonLatToWorld = LL;`, context);
-  vm.runInContext(read('js/ground.js'), context);
-  vm.runInContext(read('js/guest.js'), context);
-  return window.NYC;
-}
 const plain = (o) => JSON.parse(JSON.stringify(o));
 
 test('composite and logDepth are off by default, and the other options keep their defaults', () => {
@@ -217,14 +191,15 @@ test('composite and logDepth are off by default, and the other options keep thei
 test('what a guest leaves out isn\'t built: the other boroughs, the crowds, the shadow stand-ins', () => {
   const guest = readFileSync(join(__dirname, '../js/guest.js'), 'utf8');
   assert.match(guest, /const boroughs = opts\.extent === 'all' \? step\('boroughs'/);
-  assert.match(guest, /\{ pedestrians: opts\.crowds \}/);
+  assert.match(guest, /streetDetails\.signalIntersections, \{ pedestrians: opts\.crowds \}/);
   assert.match(guest, /setupSceneCulling\(scene, cullingRoots, opts\.shadows \? lighting\.sunLight\.shadow : null\)/);
   const traffic = readFileSync(join(__dirname, '../js/traffic.js'), 'utf8');
-  assert.match(traffic, /function createTrafficSystem\(scene, sidewalks, obstacles, \{ pedestrians = true \} = \{\}\)/);
-  // No crowd: none made, and every use of it guarded (the per-person ones run only for people there are)
-  assert.match(traffic, /const pedCrowd = numPeds \? new PersonCrowd\(numPeds\) : null;/);
-  for (const use of traffic.match(/^.*pedCrowd\.(?:begin|end|meshes).*$/gm)) assert.match(use, /if \(pedCrowd\)/);
-  assert.doesNotMatch(traffic, /i < NUM_PEDS/);
+  assert.match(traffic, /function createTrafficSystem\(scene, sidewalks, obstacles, signalIntersections, \{ pedestrians = true \} = \{\}\)/);
+  // No crowd: no pedestrian system (pedestrian-system.js), and one that walks no one in its place
+  assert.match(traffic, /if \(pedestrians\) \{\n\s*pedestrianSystem = createPedestrianSystem\(network,/);
+  assert.match(traffic, /pedestrianSystem = \{ peds: \[\], meshes: \[\], update\(\) \{\} \};/);
+  // the vehicles read every node's crosswalk walkers, which the pedestrian system would have set up
+  assert.match(traffic, /n\.walkers = \[\];\n\s*n\.curb = \[\];/);
 });
 
 test('the material pass sees each node material once, and keys its program by what it added', () => {

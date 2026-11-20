@@ -1,4 +1,3 @@
-(function () {
 // Touch input stays separate from the keyboard, so releasing a finger never releases a held key.
 const DEAD_ZONE = 0.15;
 const MAX_RADIUS = 44;
@@ -98,8 +97,7 @@ class TouchControls {
     if (!['person', 'car', 'cyclist', 'helicopter'].includes(mode)) return;
     this.reset();
     if (!this.root) return;
-    this.mode = mode;
-    const labels = { boost: mode === 'person' || mode === 'cyclist' ? 'Sprint' : 'Boost', up: mode === 'helicopter' ? 'Ascend' : 'Jump', down: 'Descend' };
+    const labels = { up: mode === 'helicopter' ? 'Ascend' : 'Jump', down: 'Descend' };
     for (const button of this.buttons) {
       const action = button.getAttribute('data-touch-action');
       button.hidden = (action === 'up' && mode !== 'person' && mode !== 'helicopter') || (action === 'down' && mode !== 'helicopter');
@@ -166,5 +164,4 @@ class TouchControls {
   }
 }
 
-Object.assign(window.NYC, { TouchControls });
-})();
+export { TouchControls };

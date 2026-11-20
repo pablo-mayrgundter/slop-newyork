@@ -1,12 +1,17 @@
-(function () {
 // js/ground.js
 // The city on a ground that isn't flat: the world frame on the Earth, the ground's heights as lifts, the per-vertex
 // lift every material takes, the ground layers split to follow it, and the lamps lifted with it. Shared by the guest
 // (js/guest.js, on a host's terrain) and the app (js/main.js, index.html?ground=demo: a made-up hill, THE APP ON THE
 // GROUND). Only the drawing follows the ground: the simulation, the physics and the colliders stay on the flat plane.
-// Nothing here runs at load: TSL, lonLatToWorld (boroughs.js) and the addons are read when the functions are called.
+// Nothing here runs at load: the tests load it in node:vm with a stub of three that has only Matrix4, so any other three
+// object is made on first use, and the TSL nodes only when a ground is made.
 
-const { THREE } = window.NYC;
+import * as THREE from 'three/webgpu';
+import { Fn, texture, uniform, vec2, vec3, vec4, ivec2, mat3, dot, floor, min, clamp, select, length, positionLocal, positionGeometry, normalLocal, modelWorldMatrix, modelWorldMatrixInverse } from 'three/tsl';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { GEO } from './nyc-geodata.js';
+import { lonLatToWorld } from './boroughs.js';
+import { setGroundLift } from './tsl-materials.js';
 
 // =====================================================================================================================
 // THE FRAME ON THE EARTH
@@ -20,7 +25,6 @@ const LAT0 = 40.75318;
 const WATER_Y = -2.2; // the harbour's surface in the world frame (boroughs.js): mean sea level, for the host's datum
 
 function makeGeoFrame() {
-  const { lonLatToWorld } = window.NYC;
   // Metres per degree of longitude and latitude at LAT0 on WGS84 (as geo-base.mjs KX, KY)
   const A = 6378137.0;
   const E2 = 6.69437999014e-3;
@@ -76,7 +80,7 @@ function makeGeoFrame() {
 // heights (metres above the host's ellipsoid, or any datum): every vertex is then raised by the ground's height over
 // height0, its height at (LON0, LAT0), less the curve, and the host puts the world frame's origin at height0. Only the
 // drawing follows the ground: the simulation (traffic, colliders, culling) and the shading's storeys, kerbs and
-// waterlines (NYC.deckPosition, tsl-materials.js) stay on the plane. Outside the bounds the ground holds its edge.
+// waterlines (deckPosition, tsl-materials.js) stay on the plane. Outside the bounds the ground holds its edge.
 // =====================================================================================================================
 // The island and its piers as the guest draws them (extent 'manhattan': x -2256..2575, z -7111..6518), with a margin
 const GROUND_BOUNDS = { x0: -2700, x1: 2900, z0: -7400, z1: 6800 };
@@ -682,7 +686,7 @@ function bakeInstances(o) {
     o.getMatrixAt(k, m);
     parts.push(geo.clone().applyMatrix4(m));
   }
-  const merged = window.NYC.Addons.mergeGeometries(parts, false);
+  const merged = mergeGeometries(parts, false);
   const baked = new THREE.Mesh(merged, o.material);
   for (const k of ['name', 'castShadow', 'receiveShadow', 'renderOrder', 'frustumCulled', 'visible']) baked[k] = o[k];
   baked.layers.mask = o.layers.mask;
@@ -774,8 +778,8 @@ function drapeGroundLayers(layers, ground, options = {}) {
 }
 
 // The ground's nodes, made once per page (TSL is only there in a browser) and shared by its guests: a vertex's lift is a
-// function of where it stands, the same for every guest of the same host. NYC.groundLift, the lift as a varying, is
-// what NYC.deckPosition (tsl-materials.js) takes off positionWorld to keep the shading's storeys on the road deck.
+// function of where it stands, the same for every guest of the same host. the lift (setGroundLift), the lift as a varying, is
+// what deckPosition (tsl-materials.js) takes off positionWorld to keep the shading's storeys on the road deck.
 const groundNodes = {};
 // options.linear: the linear ground's nodes (makeGround's linear), which also leave out what lies at or under the
 // harbour's surface (SHORE_RAMP: a seawall's foot stays in the water as its top rises with the shore) and any object
@@ -792,10 +796,9 @@ const SKIRT_MAX = 12;
 function getGroundNodes(tangent, { linear = false } = {}) {
   const variant = linear ? 'linear' : 'bilinear';
   if (groundNodes[variant]) {
-    window.NYC.groundLift = groundNodes[variant].varyingLift;
+    setGroundLift(groundNodes[variant].varyingLift);
     return groundNodes[variant];
   }
-  const { Fn, texture, uniform, vec2, vec3, vec4, ivec2, mat3, dot, floor, min, clamp, select, length, positionLocal, positionGeometry, normalLocal, modelWorldMatrix, modelWorldMatrixInverse } = window.NYC.TSL;
   const map = texture(linear ? makeLinearMap(new Float32Array(4), 2, 2) : makeOffsetMap(new Float32Array(4), 2, 2));
   const box = uniform(new THREE.Vector4(0, 0, 1, 1)); // x0, z0, 1 / (cols dx), 1 / (rows dz)
   const texel = uniform(new THREE.Vector2(0.25, 0.25)); // half a texel: grid points sit on texel centres
@@ -861,7 +864,7 @@ function getGroundNodes(tangent, { linear = false } = {}) {
   const at = modelWorldMatrix.mul(vec4(positionLocal, 1.0));
   const varyingLift = ground(at.xz, at.y).x.toVarying('vGroundLift');
   groundNodes[variant] = { map, box, texel, on, curvature, cells, size, lift, linear, varyingLift };
-  window.NYC.groundLift = varyingLift;
+  setGroundLift(varyingLift);
   return groundNodes[variant];
 }
 
@@ -946,7 +949,7 @@ function prepareMaterials(scene, { lift = null, output = null, setupDepth = null
 // =====================================================================================================================
 // THE DRAPE
 // What the guest and the app do with a ground, in this order:
-//   createGroundDrape()   before the city is built: its nodes set NYC.groundLift, which the materials' deckPosition reads
+//   createGroundDrape()   before the city is built: its nodes set the lift (setGroundLift), which the materials' deckPosition reads
 //   takeLayers(scene)     once the city is built, before the culling set-up: the ground layers (their instanced slabs
 //                         baked, groundLayers)
 //   liftMaterial          prepareMaterials' lift, before the pipelines compile: every material's vertex stage adds the
@@ -1085,6 +1088,7 @@ function liftObject(o, ground) {
   if (parent) _liftP.applyMatrix3(_liftM.setFromMatrix4(parent.matrixWorld).invert());
   o.position.copy(u.groundBase).add(_liftP);
   u.groundLifted = (u.groundLifted || new THREE.Vector3()).copy(o.position);
+  o.updateMatrixWorld(); // the app's scene doesn't update matrices itself (main.js matrixWorldAutoUpdate)
 }
 
 // =====================================================================================================================
@@ -1212,7 +1216,7 @@ const APP_QUIET = 1e-3;
 
 // Per grid point (samples()' grid, row by row), whether it is on Manhattan: the detailed island and the upper one
 // (nyc-geodata.js manhattan, upperManhattan, which meet at the cut), by each row's crossings with their shores
-function manhattanMask(grid, polygons = [window.NYC.GEO.manhattan, window.NYC.GEO.upperManhattan]) {
+function manhattanMask(grid, polygons = [GEO.manhattan, GEO.upperManhattan]) {
   const { x0, z0, dx, dz, cols, rows } = grid;
   const keep = new Uint8Array(cols * rows);
   const xs = [];
@@ -1236,10 +1240,6 @@ function manhattanMask(grid, polygons = [window.NYC.GEO.manhattan, window.NYC.GE
   }
   return keep;
 }
-
-// The URL of a module next to this script (terrarium.mjs), read when ground.js is loaded: a classic script's import()
-// resolves from the page otherwise
-const GROUND_SCRIPT = typeof document !== 'undefined' && document.currentScript ? document.currentScript.src : null;
 
 // The app's ground (main.js): null without ?ground=demo or ?ground=terrain (query: the page's URLSearchParams, or just
 // ?ground's value), and the city drawn as before
@@ -1341,8 +1341,7 @@ function createTerrainGround() {
   const keep = manhattanMask(grid);
   stats.samples = cols * rows;
   stats.maskMs = Math.round(performance.now() - t0);
-  const where = GROUND_SCRIPT ? new URL('terrarium.mjs', GROUND_SCRIPT).href : './js/terrarium.mjs';
-  const loading = import(where)
+  const loading = import('./terrarium.mjs')
     .then((T) => T.loadTerrarium(lonLat, { keep }))
     .then((r) => {
       stats.tiles = r.tiles;
@@ -1377,8 +1376,7 @@ function liftAppCamera(cameraSystem, ground) {
   camera.lookAt(look.x, look.y + liftLook, look.z);
 }
 
-Object.assign(window.NYC, {
+export {
   makeGeoFrame, makeGround, subdivideTriangles, conformTriangles, prepareMaterials, createGroundDrape, demoGroundHeights,
   drapeGroundLayers, createAppGround, parseGroundOptions, demoGroundGrid, manhattanMask, skirtObjects, DEMO_SEA_LEVEL
-});
-})();
+};

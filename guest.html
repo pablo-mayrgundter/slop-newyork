@@ -13,14 +13,14 @@
     #panel input { vertical-align: middle; width: 180px; }
     #perf { margin-top: 4px; font: 12px ui-monospace, monospace; white-space: pre; }
   </style>
-  <!-- three.js dev branch, as index.html -->
+  <!-- three.js as index.html pins it -->
   <script type="importmap">
     {
       "imports": {
-        "three": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/build/three.webgpu.js",
-        "three/webgpu": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/build/three.webgpu.js",
-        "three/tsl": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/build/three.tsl.js",
-        "three/addons/": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/examples/jsm/"
+        "three": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@8b92052852735b67cfa8393f78e707b3f07a0eec/build/three.webgpu.js",
+        "three/webgpu": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@8b92052852735b67cfa8393f78e707b3f07a0eec/build/three.webgpu.js",
+        "three/tsl": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@8b92052852735b67cfa8393f78e707b3f07a0eec/build/three.tsl.js",
+        "three/addons/": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@8b92052852735b67cfa8393f78e707b3f07a0eec/examples/jsm/"
       }
     }
   </script>
@@ -42,7 +42,10 @@
     //   ?dpr=1         the drawing buffer in CSS pixels (default the device's: 4x the pixels on a 2x screen)
     // The panel reads out the frame rate, the frame time, and the JavaScript time in update() and render() (render's
     // includes any wait on the GPU), with the draws and triangles of a frame, shadow passes included
+    import * as THREE from 'three/webgpu';
     import { createNYCGuest } from './js/guest-entry.mjs';
+    import { DEMO_SEA_LEVEL, demoGroundHeights } from './js/ground.js';
+    import { avenueX, streetZ } from './js/city-config.js';
 
     const canvas = document.getElementById('c');
     const status = document.getElementById('status');
@@ -60,7 +63,6 @@
       lights: params.get('lights') !== '0'
     });
     window.__NYC_GUEST = guest;
-    const { THREE } = window.NYC;
 
     // Sun from the hour: azimuth through south at noon, a 36° noon elevation (New York in late October), in the world
     // frame (east = grid east turned back by the grid's 29°)
@@ -86,8 +88,8 @@
     // it, as at Manhattan). The guest adds the globe's curve itself
     if (params.get('ground') === 'demo') {
       const { lonLat } = guest.groundSamples(40);
-      const seaLevel = window.NYC.DEMO_SEA_LEVEL;
-      guest.setGround(window.NYC.demoGroundHeights(lonLat, guest.frame, seaLevel), { seaLevel });
+      const seaLevel = DEMO_SEA_LEVEL;
+      guest.setGround(demoGroundHeights(lonLat, guest.frame, seaLevel), { seaLevel });
     }
 
     status.textContent = 'Compiling…';
@@ -96,7 +98,6 @@
 
     // The host's camera, handed over as matrices each frame (as a host engine would), standing on the ground
     const hostCamera = new THREE.PerspectiveCamera(50, w / h, 1, 60000);
-    const { avenueX, streetZ } = window.NYC;
     const onGround = (x, y, z) => new THREE.Vector3(x, y + guest.groundOffsetAt(x, z), z);
     const VIEWS = {
       aerial: (angle) => [onGround(Math.sin(angle) * 1400, 520, Math.cos(angle) * 1400 - 300), onGround(0, 0, -300)],
