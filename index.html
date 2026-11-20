@@ -7,61 +7,72 @@
   <link rel="icon" href="data:," />
   <meta name="description" content="Photorealistic GTA-style 3D Slop New York simulation built with Three.js WebGPURenderer and TSL shaders featuring complete Manhattan street map (125th St to Battery Park), third-person navigation (Person, Car, Cyclist, Helicopter), and 11 cinematic cameras at 60 FPS." />
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
-  <script>
-    // Download the city scripts while Three.js loads; execute them only after its imports are ready below.
-    const nycAppScripts = (() => {
-      const assetVersion = '20261023-ground';
-      return [
-        './js/nyc-geodata.js',
-        './js/city-config.js',
-        './js/tsl-materials.js',
-        './js/trees.js',
-        './js/actor-models.js',
-        './js/vehicle-lights.js',
-        './js/pedestrians.js',
-        './js/lighting.js',
-        './js/city-grid.js',
-        './js/boroughs.js',
-        './js/buildings.js',
-        './js/landmarks.js',
-        './js/street-details.js',
-        './js/road-network.js',
-        './js/road-paint.js',
-        './js/traffic.js',
-        './js/controllers.js',
-        './js/touch-controls.js',
-        './js/cameras.js',
-        './js/nyc-map.js',
-        './js/scene-culling.js',
-        './js/ground.js',
-        './js/post-processing.js',
-        './js/main.js'
-      ].map((src) => `${src}?v=${assetVersion}`);
-    })();
-    for (const src of nycAppScripts) {
-      const preload = document.createElement('link');
-      preload.rel = 'preload';
-      preload.as = 'script';
-      preload.href = src;
-      document.head.appendChild(preload);
+  <!-- three.js r188dev, pinned to dev commit 8b92052 (GitHub, served by jsDelivr) -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@8b92052852735b67cfa8393f78e707b3f07a0eec/build/three.webgpu.js",
+        "three/webgpu": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@8b92052852735b67cfa8393f78e707b3f07a0eec/build/three.webgpu.js",
+        "three/tsl": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@8b92052852735b67cfa8393f78e707b3f07a0eec/build/three.tsl.js",
+        "three/addons/": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@8b92052852735b67cfa8393f78e707b3f07a0eec/examples/jsm/"
+      }
     }
   </script>
+  <!-- Fetch the city modules in parallel before stylesheets; the module graph controls evaluation order. -->
+  <link rel="modulepreload" href="./js/nyc-geodata.js" />
+  <link rel="modulepreload" href="./js/city-config.js" />
+  <link rel="modulepreload" href="./js/tsl-materials.js" />
+  <link rel="modulepreload" href="./js/trees.js" />
+  <link rel="modulepreload" href="./js/tree-placements.js" />
+  <link rel="modulepreload" href="./js/tree-geodata.js" />
+  <link rel="preload" href="./js/tree-geodata.bin.gz" as="fetch" crossorigin />
+  <link rel="modulepreload" href="./js/vehicles.js" />
+  <link rel="modulepreload" href="./js/cars.js" />
+  <link rel="modulepreload" href="./js/bus.js" />
+  <link rel="modulepreload" href="./js/helicopter.js" />
+  <link rel="modulepreload" href="./js/vehicle-lights.js" />
+  <link rel="modulepreload" href="./js/vehicle-physics.js" />
+  <link rel="modulepreload" href="./js/pedestrians.js" />
+  <link rel="modulepreload" href="./js/lighting.js" />
+  <link rel="modulepreload" href="./js/city-grid.js" />
+  <link rel="modulepreload" href="./js/boroughs.js" />
+  <link rel="modulepreload" href="./js/buildings.js" />
+  <link rel="modulepreload" href="./js/building-details.js" />
+  <link rel="modulepreload" href="./js/building-geodata.js" />
+  <link rel="preload" href="./js/building-geodata.bin.gz" as="fetch" crossorigin />
+  <link rel="modulepreload" href="./js/building-footprints.js" />
+  <link rel="modulepreload" href="./js/building-collision.js" />
+  <link rel="modulepreload" href="./js/fire-escapes.js" />
+  <link rel="modulepreload" href="./js/landmarks.js" />
+  <link rel="modulepreload" href="./js/street-details.js" />
+  <link rel="modulepreload" href="./js/street-props.js" />
+  <link rel="modulepreload" href="./js/subway-geodata.js" />
+  <link rel="modulepreload" href="./js/subway-entrances.js" />
+  <link rel="modulepreload" href="./js/road-network.js" />
+  <link rel="modulepreload" href="./js/road-paint.js" />
+  <link rel="modulepreload" href="./js/traffic.js" />
+  <link rel="modulepreload" href="./js/pedestrian-system.js" />
+  <link rel="modulepreload" href="./js/pedestrian-routes.js" />
+  <link rel="modulepreload" href="./js/controllers.js" />
+  <link rel="modulepreload" href="./js/touch-controls.js" />
+  <link rel="modulepreload" href="./js/gamepad-controls.js" />
+  <link rel="modulepreload" href="./js/cameras.js" />
+  <link rel="modulepreload" href="./js/nyc-map.js" />
+  <link rel="modulepreload" href="./js/scene-culling.js" />
+  <link rel="modulepreload" href="./js/ground.js" />
+  <link rel="modulepreload" href="./js/post-processing.js" />
+  <link rel="modulepreload" href="./js/audio-synthesis.js" />
+  <link rel="modulepreload" href="./js/audio-events.js" />
+  <link rel="modulepreload" href="./js/audio-sources.js" />
+  <link rel="modulepreload" href="./js/audio-acoustics.js" />
+  <link rel="modulepreload" href="./js/audio-system.js" />
+  <link rel="modulepreload" href="./js/main.js" />
+  <script type="module" src="./js/main.js"></script>
   <!-- Inter (UI) & Overpass (street-name signs: modelled on Highway Gothic, the US road sign typeface) -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400..800&amp;family=Overpass:wght@600;700&amp;display=swap" />
   <link rel="stylesheet" href="./css/style.css?v=20261022-repo-link" />
-  <!-- three.js dev branch (builds committed to mrdoob/three.js@dev, served by jsDelivr) -->
-  <script type="importmap">
-    {
-      "imports": {
-        "three": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/build/three.webgpu.js",
-        "three/webgpu": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/build/three.webgpu.js",
-        "three/tsl": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/build/three.tsl.js",
-        "three/addons/": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/examples/jsm/"
-      }
-    }
-  </script>
 </head>
 <body>
   <!-- Icon sprite (24 × 24 stroke icons, drawn in currentColor) -->
@@ -79,6 +90,8 @@
       <symbol id="i-map" viewBox="0 0 24 24"><path d="M9 4.5 3.5 6.6v13l5.5-2.1 6 2.1 5.5-2.1v-13L15 6.6 9 4.5zM9 4.5v13M15 6.6v13"/></symbol>
       <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></symbol>
       <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M3.5 3.5l17 17M10.6 5.6c.5-.1.9-.1 1.4-.1 6 0 9.5 6.5 9.5 6.5a16 16 0 0 1-2.4 3.2M6.6 6.6A15.6 15.6 0 0 0 2.5 12s3.5 6.5 9.5 6.5c1.6 0 3.1-.4 4.4-1.1M9.9 9.9a2.8 2.8 0 0 0 4.2 4.2"/></symbol>
+      <symbol id="i-sound" viewBox="0 0 24 24"><path d="m11 4-5 4H3v8h3l5 4V4ZM15 8a6 6 0 0 1 0 8M18 5a10 10 0 0 1 0 14"/></symbol>
+      <symbol id="i-sound-off" viewBox="0 0 24 24"><path d="m11 4-5 4H3v8h3l5 4V4ZM16 9l6 6M22 9l-6 6"/></symbol>
       <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m7 9.5 5 5 5-5"/></symbol>
       <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="M14.5 6.5 9 12l5.5 5.5"/></symbol>
       <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></symbol>
@@ -97,8 +110,8 @@
     <div class="loader">
       <span class="mta-bullet loader-bullet" aria-hidden="true">NY</span>
       <div class="loader-title">Slop New York</div>
-      <div class="loader-track is-indeterminate" aria-hidden="true"><span id="loading-progress" class="loader-fill"></span></div>
-      <div id="loading-status">Initializing WebGPURenderer &amp; TSL Shaders...</div>
+      <div class="loader-track" aria-hidden="true"><span id="loading-progress" class="loader-fill"></span></div>
+      <div id="loading-status">Loading city code and data...</div>
     </div>
   </div>
 
@@ -144,6 +157,9 @@
         <svg class="icon" aria-hidden="true"><use href="#i-map"/></svg><span class="tool-label">Map</span><kbd>M</kbd>
       </button>
       <span class="toolbar-divider" aria-hidden="true"></span>
+      <button id="btn-sound" class="tool-btn icon-only" type="button" title="Mute sound [N]" aria-label="Mute sound" aria-pressed="true">
+        <svg class="icon" aria-hidden="true"><use href="#i-sound"/></svg>
+      </button>
       <button id="btn-toggle-hud" class="tool-btn icon-only" type="button" title="Clean view: hide the HUD [H]" aria-label="Hide HUD" aria-pressed="false">
         <svg class="icon icon-hide" aria-hidden="true"><use href="#i-eye"/></svg><svg class="icon icon-show" aria-hidden="true"><use href="#i-eye-off"/></svg>
       </button>
@@ -235,9 +251,6 @@
       <button class="touch-action" data-touch-action="down" type="button" aria-label="Descend" aria-pressed="false" hidden>
         <span aria-hidden="true">↓</span><span data-touch-label="down">Descend</span>
       </button>
-      <button class="touch-action touch-boost" data-touch-action="boost" type="button" aria-label="Boost" aria-pressed="false">
-        <span aria-hidden="true">↟</span><span data-touch-label="boost">Boost</span>
-      </button>
     </div>
   </section>
 
@@ -316,37 +329,5 @@
     </div>
   </section>
 
-  <script type="module">
-    import * as THREE from 'three/webgpu';
-    import * as TSL from 'three/tsl';
-    import { bloom } from 'three/addons/tsl/display/BloomNode.js';
-    import { ssr } from 'three/addons/tsl/display/SSRNode.js';
-    import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
-    import { SkyMesh } from 'three/addons/objects/SkyMesh.js';
-    import { SunLight } from 'three/addons/lights/SunLight.js';
-    import { SunLightNode } from 'three/addons/lights/SunLightNode.js';
-    import { ClusteredLighting } from 'three/addons/lighting/ClusteredLighting.js';
-
-    window.NYC = {
-      THREE,
-      TSL,
-      PostFX: { bloom, ssr },
-      Addons: {
-        mergeGeometries,
-        mergeVertices,
-        SkyMesh,
-        SunLight,
-        SunLightNode,
-        ClusteredLighting
-      }
-    };
-
-    for (const src of nycAppScripts) {
-      const s = document.createElement('script');
-      s.src = src;
-      s.async = false;
-      document.head.appendChild(s);
-    }
-  </script>
 </body>
 </html>

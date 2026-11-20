@@ -1,22 +1,20 @@
-(function () {
-// js/cameras.js
-// Multi-camera system supporting Third-Person Chase (with mouse/touch orbit + zoom),
-// Low-Angle Action Cam, POV/Cockpit Cam, 7 Iconic NYC Architectural Cameras, and Auto-Director Drone.
+import * as THREE from 'three/webgpu';
+import { bryantParkLawn } from './landmarks.js';
 
-const { THREE } = window.NYC;
+// Chase, action, cockpit, fixed-location and aerial cameras, with mouse/touch orbit and zoom.
 
 const CAMERA_PRESETS = [
-  { id: 'chase',       name: '3rd-Person Chase',         short: 'Chase',       category: 'follow', fov: 56 },
-  { id: 'action',      name: 'Low-Angle Action',         short: 'Action',      category: 'follow', fov: 60 },
-  { id: 'pov',         name: 'First-Person / Cockpit',   short: 'POV / Dash',  category: 'follow', fov: 68 },
-  { id: 'centralPark', name: 'Central Park Oasis',       short: 'Central Pk',  category: 'scenic', fov: 52 },
-  { id: 'fifthAve',    name: '5th Ave & Empire State',   short: '5th Ave',     category: 'scenic', fov: 48 },
-  { id: 'timesSquare', name: 'Times Square Crossroads',  short: 'Times Sq',    category: 'scenic', fov: 58 },
-  { id: 'chryslerGCT', name: '42nd St · Chrysler & GCT', short: 'Chrysler',    category: 'scenic', fov: 50 },
-  { id: 'observatory', name: 'Empire State 86th Deck',   short: '86th Deck',   category: 'scenic', fov: 52 },
-  { id: 'bryantPark',  name: 'Bryant Park & NYPL',       short: 'Bryant Pk',   category: 'scenic', fov: 52 },
-  { id: 'waterfront',  name: 'East River & Skyline',     short: 'Skyline',     category: 'scenic', fov: 46 },
-  { id: 'drone',       name: 'Auto-Director Aerial',     short: 'Director',    category: 'scenic', fov: 50 }
+  { id: 'chase',       name: '3rd-Person Chase',         category: 'follow', fov: 56 },
+  { id: 'action',      name: 'Low-Angle Action',         category: 'follow', fov: 60 },
+  { id: 'pov',         name: 'First-Person / Cockpit',   category: 'follow', fov: 68 },
+  { id: 'centralPark', name: 'Central Park Oasis',       category: 'scenic', fov: 52 },
+  { id: 'fifthAve',    name: '5th Ave & Empire State',   category: 'scenic', fov: 48 },
+  { id: 'timesSquare', name: 'Times Square Crossroads',  category: 'scenic', fov: 58 },
+  { id: 'chryslerGCT', name: '42nd St · Chrysler & GCT', category: 'scenic', fov: 50 },
+  { id: 'observatory', name: 'Empire State 86th Deck',   category: 'scenic', fov: 52 },
+  { id: 'bryantPark',  name: 'Bryant Park & NYPL',       category: 'scenic', fov: 52 },
+  { id: 'waterfront',  name: 'East River & Skyline',     category: 'scenic', fov: 46 },
+  { id: 'drone',       name: 'Auto-Director Aerial',     category: 'scenic', fov: 50 }
 ];
 
 class CameraSystem {
@@ -127,14 +125,30 @@ class CameraSystem {
     }
   }
 
-  resetForTeleport() {
-    // Arrive with a fresh chase view, without carrying a previous drive or gesture into the destination.
-    this._clearPointers();
-    this.isDragging = false;
+  applyGamepadInput(lookX, lookY, zoom, dt) {
+    if (!(dt > 0) || !Number.isFinite(dt)) return;
+    if (this.activePresetId !== 'chase' && this.activePresetId !== 'pov') return;
+    // POV uses the orbit angles, but only chase renders a zoomed camera distance.
+    if (this.activePresetId !== 'chase') zoom = 0;
+    if (!lookX && !lookY && !zoom) return;
+    this.orbitYawOffset -= lookX * 2.0 * dt;
+    this.orbitPitchOffset = Math.max(-0.32, Math.min(0.68, this.orbitPitchOffset + lookY * 1.25 * dt));
+    this.zoomMultiplier = Math.max(0.45, Math.min(2.4, this.zoomMultiplier + zoom * 0.9 * dt));
+    this.userOrbitTimer = 4.0;
+  }
+
+  resetOrbit() {
     this.orbitYawOffset = 0;
     this.orbitPitchOffset = 0.09;
     this.zoomMultiplier = 1;
     this.userOrbitTimer = 0;
+  }
+
+  resetForTeleport() {
+    // Arrive with a fresh chase view, without carrying a previous drive or gesture into the destination.
+    this._clearPointers();
+    this.isDragging = false;
+    this.resetOrbit();
     this.smoothedSpeed = 0;
     this.followEntity = null;
     this.followOffset.set(0, 0, 0);
@@ -240,9 +254,9 @@ class CameraSystem {
       }
 
       case 'centralPark': {
-        // Inside Central Park South looking across The Pond, Gapstow Bridge, The Mall, Sheep Meadow & UWS/UES Skylines
+        // Above the southern canopy, looking across The Pond toward the park and skyline.
         const sway = Math.sin(elapsed * 0.22) * 3.5;
-        desiredPos.set(-70.0 + sway, 14.0, -1425.0);
+        desiredPos.set(-70.0 + sway, 26.0, -1425.0);
         desiredLook.set(-250.0, 6.5, -1690.0);
         break;
       }
@@ -282,7 +296,7 @@ class CameraSystem {
       case 'bryantPark': {
         // Inside Bryant Park Great Lawn looking East toward NYPL portico, One Vanderbilt & Chrysler Building
         const sway = Math.sin(elapsed * 0.25) * 1.5;
-        const lawn = window.NYC.bryantParkLawn || { minX: -260, maxX: -150, minZ: 40, maxZ: 120, top: 1.3 };
+        const lawn = bryantParkLawn || { minX: -260, maxX: -150, minZ: 40, maxZ: 120, top: 1.3 };
         const lz = (lawn.minZ + lawn.maxZ) * 0.5;
         desiredPos.set(lawn.minX + 18.0, lawn.top + 1.7, lz + sway);
         desiredLook.set(lawn.maxX + 260.0, 70.0, lz - 60.0);
@@ -348,5 +362,4 @@ class CameraSystem {
   }
 }
 
-Object.assign(window.NYC, { CAMERA_PRESETS, CameraSystem });
-})();
+export { CAMERA_PRESETS, CameraSystem };

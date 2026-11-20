@@ -1,36 +1,138 @@
-(function () {
-// js/controllers.js
-// Sculpted, non-blocky GTA 6-style 3D models, animations, and physics controllers
-// for Third-Person Navigation:
-// 1. Person (Skinned Pedestrian: planted-footstep IK walk/run/jump, see pedestrians.js)
-// 2. Car (Aerodynamic Sculpted NYC Medallion Yellow Taxi with Sloped Windshield & Clearcoat)
-// 3. Cyclist (Sculpted Road Cyclist with Drop-Bar Frame & Aero Helmet)
-// 4. Helicopter (Manhattan Sightseeing Twin-Turbine Chopper)
-
-const { THREE } = window.NYC;
-const { ISLAND_BOUNDS, CENTRAL_PARK_BOUNDS, LANDMARK_SITES, getIslandBoundsAtZ, isTypingInField, blockAt, streetZ } = window.NYC;
-// Spawn on 5th Ave at 37th St, facing south down the avenue toward the Empire State Building (34th St)
-const SPAWN_Z = streetZ(37);
-const {
-  cityUniforms,
-  createCarPaintMaterial,
-  createContactShadowMaterial
-} = window.NYC;
-const {
+import * as THREE from 'three/webgpu';
+import {
+  ISLAND_BOUNDS,
+  CENTRAL_PARK_BOUNDS,
+  getIslandBoundsAtZ,
+  isTypingInField,
+  blockAt,
+  streetZ
+} from './city-config.js';
+import { cityUniforms, createCarPaintMaterial, createContactShadowMaterial } from './tsl-materials.js';
+import {
   BODY_SPECS,
   buildCarGeometry,
   buildCarSidePatch,
   buildSteerableWheelGeo,
-  createLoftedCarMaterial,
+  carTipZ,
+  createCarWheelMaterial,
+  createLoftedCarMaterial
+} from './cars.js';
+import {
   buildHelicopterBodyGeometry,
   buildHelicopterMainRotorGeometry,
   buildHelicopterTailRotorGeometry,
   createLoftedHelicopterMaterial
-} = window.NYC;
-const { PersonCrowd, PersonRig } = window.NYC;
-const { HEADLIGHTS, createVehicleHeadlight, placeVehicleHeadlight } = window.NYC;
+} from './helicopter.js';
+import { PersonCrowd, PersonRig } from './pedestrians.js';
+import { HEADLIGHTS, createVehicleHeadlight, placeVehicleHeadlight } from './vehicle-lights.js';
+import { bryantParkLawn } from './landmarks.js';
+import { polygonContact } from './building-collision.js';
+
+// Player models, animation and movement for walking, driving, cycling and flying.
+
+// Spawn on 5th Ave at 37th St, facing south down the avenue toward the Empire State Building (34th St)
+const SPAWN_Z = streetZ(37);
+const groundCollider = { type: 'ground' };
+
+const CAR_DRIVE = {
+  speed: 36, reverseSpeed: 10.5, acceleration: 4.5,
+  powerSpeed: 14.5, // Above 52 km/h, engine power limits acceleration.
+  rolling: 0.18, drag: 0.0012, coast: 0.6, brake: 9,
+  wheelbase: 2.76, grip: 9.5, cornering: 10.5 // Wheelbase (m), tire and steering acceleration limits (m/s²).
+};
+const BICYCLE_DRIVE = {
+  speed: 19, reverseSpeed: 4.5, acceleration: 6.5,
+  powerSpeed: 10.5, // Above 38 km/h, rider power limits acceleration.
+  rolling: 0.1, drag: 0.004, coast: 0.45, brake: 10.5
+};
+
+function driveSpeed(speed, throttle, dt, drive) {
+  // Turning can project tiny sideways motion back into speed after braking to zero.
+  // Treat a crawl as stopped when changing direction, so this cannot hold the brakes forever.
+  if (speed * throttle < 0 && Math.abs(speed) < 0.05) speed = 0;
+  const braking = speed * throttle < 0;
+  const magnitude = Math.abs(speed);
+  // Extra resistance on release gives a stronger slowdown while coasting.
+  const deceleration = drive.rolling + (!throttle ? drive.coast : braking ? Math.abs(throttle) * drive.brake : 0);
+  // Constant rolling resistance and quadratic air drag, without crossing zero or large-dt instability.
+  const coasting = Math.max(0, magnitude - deceleration * dt) / (1 + drive.drag * magnitude * dt);
+  if (!throttle || braking) return Math.sign(speed) * coasting;
+
+  const limit = throttle < 0 ? drive.reverseSpeed : drive.speed;
+  let acceleration = drive.acceleration;
+  if (drive.powerSpeed) acceleration *= drive.powerSpeed / Math.max(drive.powerSpeed, magnitude);
+  // Collision momentum above the powered limit decays naturally instead of being clamped.
+  return Math.sign(throttle) * Math.min(Math.max(limit, coasting), coasting + Math.abs(throttle) * acceleration * dt);
+}
+
 // Walking surface for the player's pedestrian (its rig samples it around its feet)
 const personGround = (controllers, x, z) => controllers.getGroundHeight(x, z, 'person');
+
+function collisionBody(mode, radius, heading, margin = 0) {
+  const car = mode === 'car';
+  const sin = Math.sin(heading), cos = Math.cos(heading);
+  const hx = 0.86 + margin, hz = 2.18 + margin;
+  return {
+    car, sin, cos, hx, hz, radius: radius + margin,
+    extX: car ? Math.abs(cos) * hx + Math.abs(sin) * hz : radius + margin,
+    extZ: car ? Math.abs(sin) * hx + Math.abs(cos) * hz : radius + margin,
+    bottom: mode === 'helicopter' ? -0.25 : 0,
+    top: mode === 'helicopter' ? 3.2 : car ? 1.8 : 1.9
+  };
+}
+
+// Movement and teleports share exact footprint checks after rejecting distant bounds.
+// Walking/cycling/flying use circles; cars use oriented rectangles.
+function buildingContact(c, x, y, z, body, contact) {
+  if (y + body.bottom >= c.maxY || y + body.top <= (c.minY ?? 0)) return false;
+  if (x + body.extX <= c.minX || x - body.extX >= c.maxX || z + body.extZ <= c.minZ || z - body.extZ >= c.maxZ) return false;
+  if (c.polygon) return polygonContact(c.polygon, x, z, body, contact);
+  const o = c.obb;
+  const cs = o ? o.cs : 1, sn = o ? o.sn : 0;
+  const hx = o ? o.hx : (c.maxX - c.minX) * 0.5;
+  const hz = o ? o.hz : (c.maxZ - c.minZ) * 0.5;
+  const dx = x - (o ? o.cx : (c.minX + c.maxX) * 0.5);
+  const dz = z - (o ? o.cz : (c.minZ + c.maxZ) * 0.5);
+  const lx = dx * cs - dz * sn, lz = dx * sn + dz * cs;
+  let nx = 0, nz = 0, depth = Infinity;
+  if (body.car) {
+    const ls = body.sin * cs - body.cos * sn, lc = body.sin * sn + body.cos * cs;
+    for (let axis = 0; axis < 4; axis++) {
+      const ax = axis === 0 ? 1 : axis === 1 ? 0 : axis === 2 ? lc : ls;
+      const az = axis === 0 ? 0 : axis === 1 ? 1 : axis === 2 ? -ls : lc;
+      const distance = lx * ax + lz * az;
+      const overlap = hx * Math.abs(ax) + hz * Math.abs(az)
+        + body.hx * Math.abs(ax * lc - az * ls) + body.hz * Math.abs(ax * ls + az * lc) - Math.abs(distance);
+      if (overlap <= 0) return false;
+      if (overlap < depth) {
+        depth = overlap;
+        const sign = distance <= 0 ? -1 : 1;
+        nx = ax * sign; nz = az * sign;
+      }
+    }
+  } else {
+    const qx = lx - Math.max(-hx, Math.min(hx, lx));
+    const qz = lz - Math.max(-hz, Math.min(hz, lz));
+    const distance = Math.hypot(qx, qz);
+    if (distance >= body.radius) return false;
+    if (distance > 0) {
+      nx = qx / distance; nz = qz / distance;
+      depth = body.radius - distance;
+    } else if (hx - Math.abs(lx) <= hz - Math.abs(lz)) {
+      nx = lx <= 0 ? -1 : 1;
+      depth = hx - Math.abs(lx) + body.radius;
+    } else {
+      nz = lz <= 0 ? -1 : 1;
+      depth = hz - Math.abs(lz) + body.radius;
+    }
+  }
+  if (contact) {
+    contact.nx = nx * cs + nz * sn;
+    contact.nz = -nx * sn + nz * cs;
+    contact.depth = depth;
+  }
+  return true;
+}
 
 function createTaxiDoorDecalTexture() {
   const c = document.createElement('canvas');
@@ -60,6 +162,8 @@ function createTaxiDoorDecalTexture() {
   ctx.fillText('$3.00 INITIAL FARE', 112, 90);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
+  // The decals are mostly seen at grazing angles from the chase camera
+  tex.anisotropy = 16;
   return tex;
 }
 
@@ -83,6 +187,7 @@ function createNYLicensePlateTexture() {
   ctx.fillText('NYC T&LC', 128, 114);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 16;
   return tex;
 }
 
@@ -99,8 +204,7 @@ class ThirdPersonControllerManager {
       left: false,
       right: false,
       up: false,
-      down: false,
-      boost: false
+      down: false
     };
 
     this.entities = {
@@ -129,6 +233,21 @@ class ThirdPersonControllerManager {
     this.bindKeyboard();
   }
 
+  setCollisionListener(listener) {
+    this._collisionListener = typeof listener === 'function' ? listener : null;
+    this._collisionEvent ??= { a: null, b: null, kind: '', x: 0, y: 0, z: 0, nx: 0, ny: 0, nz: 0, speed: 0 };
+  }
+
+  // Reuse one synchronous event; consumers must copy retained fields. Normal points from b toward a.
+  reportCollision(a, b, kind, x, y, z, nx, ny, nz, speed) {
+    if (!this._collisionListener || speed <= 0.5) return;
+    const event = this._collisionEvent;
+    event.a = a; event.b = b; event.kind = kind;
+    event.x = x; event.y = y; event.z = z;
+    event.nx = nx; event.ny = ny; event.nz = nz; event.speed = speed;
+    this._collisionListener(event);
+  }
+
   bindKeyboard() {
     const bindings = {
       forward: ['KeyW', 'ArrowUp'],
@@ -136,13 +255,13 @@ class ThirdPersonControllerManager {
       left: ['KeyA', 'ArrowLeft'],
       right: ['KeyD', 'ArrowRight'],
       up: ['Space', 'KeyE'],
-      down: ['KeyQ', 'KeyC'],
-      boost: ['ShiftLeft', 'ShiftRight']
+      down: ['KeyQ', 'KeyC']
     };
     const actionsByCode = new Map(Object.entries(bindings).flatMap(([action, codes]) => codes.map((code) => [code, action])));
     this._pressedCodes = new Set();
     this._keyboardKeys = {};
     this._touchKeys = {};
+    this._gamepadKeys = {};
 
     const onKey = (e, isDown) => {
       const action = actionsByCode.get(e.code);
@@ -151,7 +270,7 @@ class ThirdPersonControllerManager {
       else this._pressedCodes.delete(e.code);
       // Releasing one binding must not cancel another key held for the same action.
       this._keyboardKeys[action] = bindings[action].some((code) => this._pressedCodes.has(code));
-      this.keys[action] = this._keyboardKeys[action] || this._touchKeys[action] || false;
+      this._blendInput(action);
     };
 
     window.addEventListener('keydown', (e) => onKey(e, true));
@@ -162,38 +281,73 @@ class ThirdPersonControllerManager {
     });
   }
 
-  setTouchInput(action, value) {
+  _blendInput(action) {
+    const keyboard = this._keyboardKeys[action] || false;
+    const touch = this._touchKeys[action] || false;
+    const gamepad = this._gamepadKeys[action] || false;
+    const strength = Math.max(keyboard, touch, gamepad);
+    // Preserve digital button values while allowing either analog source to be strongest.
+    this.keys[action] = keyboard === true || touch === true || gamepad === true ? true : strength || false;
+  }
+
+  _setAnalogInput(source, action, value) {
     if (!Object.hasOwn(this.keys, action)) return;
-    this._touchKeys[action] = typeof value === 'boolean' ? value : Math.max(0, Math.min(1, Number(value) || 0));
-    this.keys[action] = this._keyboardKeys[action] || this._touchKeys[action] || false;
+    const strength = Number(value);
+    source[action] = typeof value === 'boolean' ? value : Number.isFinite(strength) ? Math.max(0, Math.min(1, strength)) : 0;
+    this._blendInput(action);
+  }
+
+  setTouchInput(action, value) {
+    this._setAnalogInput(this._touchKeys, action, value);
+  }
+
+  setGamepadInput(action, value) {
+    this._setAnalogInput(this._gamepadKeys, action, value);
   }
 
   clearTouchInput() {
     this._touchKeys = {};
-    for (const action of Object.keys(this.keys)) this.keys[action] = this._keyboardKeys[action] || false;
+    for (const action of Object.keys(this.keys)) this._blendInput(action);
+  }
+
+  clearGamepadInput() {
+    this._gamepadKeys = {};
+    for (const action of Object.keys(this.keys)) this._blendInput(action);
   }
 
   resetInput() {
     this._pressedCodes.clear();
     this._keyboardKeys = {};
-    this.clearTouchInput();
+    this._touchKeys = {};
+    this._gamepadKeys = {};
+    for (const action of Object.keys(this.keys)) this.keys[action] = false;
   }
 
   setMode(mode) {
     if (!this.entities[mode]) return;
     this.activeMode = mode;
+    const active = this.entities[mode];
+    if (active.mesh) active.mesh.visible = true;
+    if (active.helmet) active.helmet.visible = true;
+    if (mode === 'person') active._charHidden = false;
+    else if (mode === 'cyclist') {
+      active._riderHidden = false;
+      active._posedX = NaN;
+    }
+    const car = this.entities.car;
+    if (mode !== 'car' && car?.carState) car.carState.value.x = car.carState.value.w = 0;
   }
 
   getActiveEntity() {
     return this.entities[this.activeMode];
   }
 
-  teleportActiveTo(x, z, heading = Math.PI) {
+  teleportActiveTo(x, z, heading = Math.PI, savedAltitude = null) {
     const ent = this.getActiveEntity();
     this.resetInput();
     if (!Number.isFinite(heading)) heading = ent.heading;
     const heli = this.activeMode === 'helicopter';
-    const altitude = heli ? Math.max(92, Math.min(380, ent.position.y)) : 0;
+    const altitude = heli ? Math.max(0.25, Math.min(380, savedAltitude ?? Math.max(92, ent.position.y))) : 0;
     const destination = this.findTeleportPosition(x, z, heading, altitude);
     if (destination) {
       ent.position.x = destination.x;
@@ -204,20 +358,36 @@ class ThirdPersonControllerManager {
     ent.speed = 0;
     if (this.activeMode === 'person') {
       ent.verticalVel = 0;
+      ent.jumping = false;
+      ent.jumpPrep = 0;
+      ent.prevX = ent.position.x;
+      ent.prevZ = ent.position.z;
+      if (ent.shadow) {
+        ent.shadow.position.y = 0.02;
+        ent.shadow.scale.set(1, 1, 1);
+      }
+      ent._charHidden = false;
+      if (ent.mesh) ent.mesh.visible = true;
       ent.rig.reset(ent.position.x, ent.position.z, ent.heading, personGround, this);
       ent.crowd.begin();
       ent.crowd.add(ent.rig, 0);
       ent.crowd.end();
     } else if (this.activeMode === 'car') {
+      ent.prevX = ent.position.x;
+      ent.prevZ = ent.position.z;
       ent.vx = ent.vz = ent.angularVel = ent.steerAngle = 0;
       ent.pitchVel = ent.rollVel = ent.heaveY = ent.heaveVel = 0;
       ent.chassisPivot.rotation.x = ent.chassisPivot.rotation.z = 0;
       ent.chassisPivot.position.y = 0;
       ent.lastCollisionSpark = null;
       for (const wheel of ent.wheels) if (wheel.isFront) wheel.steerPivot.rotation.y = 0;
-      if (ent.carState) ent.carState.value.x = 1;
+      if (ent.carState) ent.carState.value.x = ent.carState.value.w = 0;
     } else if (this.activeMode === 'cyclist') {
       ent.leanAngle = ent.leanPivot.rotation.z = 0;
+      ent._brakeHold = 0;
+      ent._riderHidden = false;
+      ent._posedX = NaN;
+      if (ent.helmet) ent.helmet.visible = true;
     } else if (heli) {
       ent.verticalSpeed = ent.pitchAngle = ent.rollAngle = 0;
       ent.tiltPivot.rotation.x = ent.tiltPivot.rotation.z = 0;
@@ -233,12 +403,10 @@ class ThirdPersonControllerManager {
   findTeleportPosition(x, z, heading, altitude) {
     if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
     const heli = this.activeMode === 'helicopter';
-    const car = this.activeMode === 'car';
     const radius = heli ? 4.5 : this.activeMode === 'person' ? 0.48 : 0.65;
     const sinH = Math.sin(heading), cosH = Math.cos(heading);
-    const extX = (car ? Math.abs(cosH) * 0.86 + Math.abs(sinH) * 2.18 : radius) + 0.1;
-    const extZ = (car ? Math.abs(sinH) * 0.86 + Math.abs(cosH) * 2.18 : radius) + 0.1;
-    const reach = Math.max(extX, extZ);
+    const shape = collisionBody(this.activeMode, radius, heading, 0.1);
+    const reach = Math.max(shape.extX, shape.extZ);
     const margin = heli ? 6000 : 0;
     const entity = this.getActiveEntity();
     // Conservative body cylinders, including the taxi's corners, bicycle wheels and helicopter tail/rotor.
@@ -263,7 +431,6 @@ class ThirdPersonControllerManager {
     const clear = (p) => {
       if (!p) return false;
       const baseY = heli ? altitude : this.getGroundHeight(p.x, p.z, this.activeMode);
-      const y = heli ? altitude : this.activeMode === 'person' ? baseY + 1 : 1;
       // Keep other player models out of both the arrival and its default chase view. A corridor also prevents a
       // parked car between camera and character from hiding the character even when the camera itself is outside it.
       const viewTop = baseY + Math.max(body[entity.type][1], cameraUp);
@@ -274,16 +441,7 @@ class ThirdPersonControllerManager {
         if (Math.hypot(dx + sinH * back, dz + cosH * back) < other.radius + Math.max(body[entity.type][0], 0.5) + 0.1) return false;
       }
       for (const c of this.nearColliders(p.x, p.z, reach)) {
-        if (y > c.maxY + 1.5) continue;
-        if (p.x + extX <= c.minX || p.x - extX >= c.maxX || p.z + extZ <= c.minZ || p.z - extZ >= c.maxZ) continue;
-        if (c.obb) {
-          const o = c.obb, dx = p.x - o.cx, dz = p.z - o.cz;
-          const ls = sinH * o.cs - cosH * o.sn, lc = sinH * o.sn + cosH * o.cs;
-          const ex = (car ? Math.abs(lc) * 0.86 + Math.abs(ls) * 2.18 : radius) + 0.1;
-          const ez = (car ? Math.abs(ls) * 0.86 + Math.abs(lc) * 2.18 : radius) + 0.1;
-          if (Math.abs(dx * o.cs - dz * o.sn) >= o.hx + ex || Math.abs(dx * o.sn + dz * o.cs) >= o.hz + ez) continue;
-        }
-        return false;
+        if (buildingContact(c, p.x, baseY, p.z, shape)) return false;
       }
       return true;
     };
@@ -328,12 +486,17 @@ class ThirdPersonControllerManager {
       type: 'person',
       label: 'Pedestrian',
       mesh: root,
+      shadow: pedShadow,
       crowd,
       rig,
       position: new THREE.Vector3(-11.6, ISLAND_BOUNDS.sidewalkHeight, SPAWN_Z + 12),
+      prevX: -11.6,
+      prevZ: SPAWN_Z + 12,
       heading: 0,
       speed: 0,
       verticalVel: 0,
+      jumping: false,
+      jumpPrep: 0,
       cameraTargetOffset: new THREE.Vector3(0, 1.55, 0),
       chaseDistance: 4.3,
       chaseHeight: 1.95
@@ -376,23 +539,24 @@ class ThirdPersonControllerManager {
       chassisPivot.add(decal);
     }
 
-    // 3. High-Detail NY Empire Gold License Plates on the bumpers
+    // 3. High-Detail NY Empire Gold License Plates on the raked bumpers, tilted to follow the fascias
     const nyPlateTex = createNYLicensePlateTexture();
     const nyPlateMat = new THREE.MeshStandardNodeMaterial({ map: nyPlateTex, roughness: 0.28 });
-    const rearPlate = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.14, 0.02), nyPlateMat);
-    rearPlate.position.set(0, spec.plates[1], spec.zRear - 0.006);
-    chassisPivot.add(rearPlate);
+    for (const front of [true, false]) {
+      const y = spec.plates[front ? 0 : 1];
+      const plate = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.14, 0.008), nyPlateMat);
+      plate.position.set(0, y, carTipZ(spec, y, front) + (front ? 0.003 : -0.003));
+      plate.rotation.x = Math.atan((carTipZ(spec, y + 0.07, front) - carTipZ(spec, y - 0.07, front)) / 0.14);
+      chassisPivot.add(plate);
+    }
 
-    const frontPlate = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.14, 0.02), nyPlateMat);
-    frontPlate.position.set(0, spec.plates[0], spec.zFront + 0.006);
-    chassisPivot.add(frontPlate);
-
-    // 3b. Brake lights, CHMSL & turn signals are lit by the taxi material from its carState uniform (see updateCar)
+    // 3b. Brake, reverse & turn lights are lit by the taxi material from its carState uniform (see updateCar)
     const carState = taxiLoftMat.userData.carState;
 
     // 4. Steerable & Spinning 3D LatheGeometry Tyres + Recessed 5-Spoke Alloy Wheels
     const leftWheelGeo = buildSteerableWheelGeo(spec, -1);
     const rightWheelGeo = buildSteerableWheelGeo(spec, 1);
+    const taxiWheelMat = createCarWheelMaterial({ wheelRadius: spec.wheelRadius });
 
     const wheels = [];
     const wheelCoords = [
@@ -404,7 +568,7 @@ class ThirdPersonControllerManager {
     for (const wc of wheelCoords) {
       const steerPivot = new THREE.Group();
       steerPivot.position.set(wc.side * spec.wheelX, spec.wheelRadius, wc.z);
-      const tire = new THREE.Mesh(wc.side < 0 ? leftWheelGeo : rightWheelGeo, taxiLoftMat);
+      const tire = new THREE.Mesh(wc.side < 0 ? leftWheelGeo : rightWheelGeo, taxiWheelMat);
       tire.castShadow = true;
       tire.receiveShadow = true;
       steerPivot.add(tire);
@@ -412,7 +576,7 @@ class ThirdPersonControllerManager {
       wheels.push({ steerPivot, tire, isFront: wc.isFront });
     }
 
-    // 5. Soft Under-Car Contact Shadow (AO) + Clustered Dual LED Headlight SpotLights & Rear Brake PointLight
+    // 5. Ground contact shadow and paired headlight spotlights
     const carShadowGeo = new THREE.PlaneGeometry(2.22, 5.05);
     carShadowGeo.rotateX(-Math.PI * 0.5);
     const carShadow = new THREE.Mesh(carShadowGeo, createContactShadowMaterial());
@@ -439,6 +603,8 @@ class ThirdPersonControllerManager {
       headLights,
       wheels,
       position: new THREE.Vector3(3.6, 0.0, SPAWN_Z + 12),
+      prevX: 3.6,
+      prevZ: SPAWN_Z + 12,
       heading: 0,
       speed: 0,
       vx: 0,
@@ -714,7 +880,7 @@ class ThirdPersonControllerManager {
       return 1.24;
     }
     // Inside Bryant Park's Great Lawn (west of the New York Public Library, 40th-42nd St)
-    const lawn = window.NYC.bryantParkLawn;
+    const lawn = bryantParkLawn;
     if (lawn && x > lawn.minX && x < lawn.maxX && z > lawn.minZ && z < lawn.maxZ) {
       return lawn.top;
     }
@@ -724,8 +890,7 @@ class ThirdPersonControllerManager {
     return 0.0;
   }
 
-  // The colliders whose bounds come within `r` of (x, z), in their original order. They never move, so they are
-  // bucketed once into 48 m cells (tens of thousands of buildings: testing them all every frame cost ~0.5 ms)
+  // Static colliders within `r` of (x, z), kept in their original order and indexed once into 48 m cells.
   nearColliders(x, z, r) {
     const CELL = 48;
     const key = (ix, iz) => (ix + 4096) * 8192 + (iz + 4096);
@@ -763,13 +928,14 @@ class ThirdPersonControllerManager {
     return out;
   }
 
-  resolveHorizontalCollision(pos, radius, yHeight = 1.0, carEntity = null) {
+  resolveHorizontalCollision(pos, radius, carEntity = null, entity = carEntity) {
     // The detailed island (the helicopter may roam out over the harbour & the boroughs)
-    const heli = this.activeMode === 'helicopter';
+    const mode = entity?.type || this.activeMode;
+    const heli = mode === 'helicopter';
     const m = heli ? 6000 : 0;
     pos.x = Math.max(ISLAND_BOUNDS.minX - m, Math.min(ISLAND_BOUNDS.maxX + m, pos.x));
     pos.z = Math.max(ISLAND_BOUNDS.minZ + (heli ? -6000 : 30), Math.min(ISLAND_BOUNDS.maxZ + m, pos.z));
-    if (this.activeMode !== 'helicopter' && getIslandBoundsAtZ) {
+    if (!heli && getIslandBoundsAtZ) {
       const shore = getIslandBoundsAtZ(pos.z);
       const minShoreX = shore.westX + 8.0;
       const maxShoreX = shore.eastX - 8.0;
@@ -782,10 +948,9 @@ class ThirdPersonControllerManager {
       }
     }
 
-    const sinH = carEntity ? Math.sin(carEntity.heading) : 0;
-    const cosH = carEntity ? Math.cos(carEntity.heading) : 1;
-    const extX = carEntity ? (Math.abs(cosH) * 0.86 + Math.abs(sinH) * 2.18) : radius;
-    const extZ = carEntity ? (Math.abs(sinH) * 0.86 + Math.abs(cosH) * 2.18) : radius;
+    const body = collisionBody(mode, radius, carEntity ? carEntity.heading : 0);
+    const { sin: sinH, cos: cosH, extX, extZ } = body;
+    const contact = this._buildingContact ??= { nx: 0, nz: 0, depth: 0 };
 
     const reach = Math.max(extX, extZ) + 6;
     let gx = pos.x;
@@ -793,65 +958,18 @@ class ThirdPersonControllerManager {
     let near = this.nearColliders(gx, gz, reach);
     for (let i = 0; i < near.length; i++) {
       const c = near[i];
-      if (yHeight > c.maxY + 1.5) continue;
+      if (buildingContact(c, pos.x, pos.y, pos.z, body, contact)) {
+        const { nx, nz, depth } = contact;
+        pos.x += nx * depth;
+        pos.z += nz * depth;
 
-      if (
-        pos.x + extX > c.minX &&
-        pos.x - extX < c.maxX &&
-        pos.z + extZ > c.minZ &&
-        pos.z - extZ < c.maxZ
-      ) {
-        let nx = 0;
-        let nz = 0;
-        if (c.obb) {
-          // Oriented box (buildings along a non-grid street; min/max are its world bounds): push out in its own frame
-          const o = c.obb;
-          const dx = pos.x - o.cx;
-          const dz = pos.z - o.cz;
-          const lx = dx * o.cs - dz * o.sn;
-          const lz = dx * o.sn + dz * o.cs;
-          const ls = sinH * o.cs - cosH * o.sn; // heading in the box's frame
-          const lc = sinH * o.sn + cosH * o.cs;
-          const ex = carEntity ? (Math.abs(lc) * 0.86 + Math.abs(ls) * 2.18) : radius;
-          const ez = carEntity ? (Math.abs(ls) * 0.86 + Math.abs(lc) * 2.18) : radius;
-          if (lx + ex <= -o.hx || lx - ex >= o.hx || lz + ez <= -o.hz || lz - ez >= o.hz) continue;
-          const oL = lx + ex + o.hx;
-          const oR = o.hx - (lx - ex);
-          const oT = lz + ez + o.hz;
-          const oB = o.hz - (lz - ez);
-          const m = Math.min(oL, oR, oT, oB);
-          let qx = lx;
-          let qz = lz;
-          let mx = 0;
-          let mz = 0;
-          if (m === oL) { qx = -o.hx - ex; mx = -1; }
-          else if (m === oR) { qx = o.hx + ex; mx = 1; }
-          else if (m === oT) { qz = -o.hz - ez; mz = -1; }
-          else { qz = o.hz + ez; mz = 1; }
-          pos.x = o.cx + qx * o.cs + qz * o.sn;
-          pos.z = o.cz - qx * o.sn + qz * o.cs;
-          nx = mx * o.cs + mz * o.sn;
-          nz = -mx * o.sn + mz * o.cs;
-        } else {
-          const overlapLeft = (pos.x + extX) - c.minX;
-          const overlapRight = c.maxX - (pos.x - extX);
-          const overlapTop = (pos.z + extZ) - c.minZ;
-          const overlapBottom = c.maxZ - (pos.z - extZ);
-
-          const minOverlap = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
-          if (minOverlap === overlapLeft) {
-            pos.x = c.minX - extX;
-            nx = -1;
-          } else if (minOverlap === overlapRight) {
-            pos.x = c.maxX + extX;
-            nx = 1;
-          } else if (minOverlap === overlapTop) {
-            pos.z = c.minZ - extZ;
-            nz = -1;
-          } else {
-            pos.z = c.maxZ + extZ;
-            nz = 1;
-          }
+        if (this._collisionListener && entity && entity.type !== 'person') {
+          const sin = carEntity ? sinH : Math.sin(entity.heading);
+          const cos = carEntity ? cosH : Math.cos(entity.heading);
+          const approachSpeed = -((sin * entity.speed + (entity.vx || 0)) * nx + (cos * entity.speed + (entity.vz || 0)) * nz);
+          const support = carEntity ? Math.abs(nx * cos - nz * sin) * 0.86 + Math.abs(nx * sin + nz * cos) * 2.18 : radius;
+          this.reportCollision(entity, c, 'building', pos.x - nx * support, pos.y + (heli ? 1.1 : 0.56), pos.z - nz * support,
+            nx, 0, nz, approachSpeed);
         }
 
         if (carEntity) {
@@ -902,24 +1020,83 @@ class ThirdPersonControllerManager {
   // Pose the skinned characters once every entity has moved: the pedestrian's rig walks (or runs, turns, jumps) it to
   // where it now is, planting its feet on the ground; the cyclist sits on the bike, hands on the grips, feet on the
   // pedals, helmet on its head
-  poseCharacters(dt) {
+  poseCharacters(dt, focusPos = null) {
+    const focus = focusPos || this.getActiveEntity()?.position;
+    const maxDistSq = 320 * 320;
+
     const p = this.entities.person;
-    const air = p.position.y - this.getGroundHeight(p.position.x, p.position.z, 'person');
-    p.rig.update(dt, p.position.x, p.position.z, p.heading, personGround, this, air > 0.02 ? air : 0);
-    p.crowd.begin();
-    p.crowd.add(p.rig, 0);
-    p.crowd.end();
+    if (p) {
+      const dx = focus ? p.position.x - focus.x : 0;
+      const dz = focus ? p.position.z - focus.z : 0;
+      if (this.activeMode === 'person' || dx * dx + dz * dz <= maxDistSq) {
+        p._charHidden = false;
+        if (p.mesh) p.mesh.visible = true;
+        const groundY = this.getGroundHeight(p.position.x, p.position.z, 'person');
+        const air = p.position.y - groundY;
+        const jumpAir = p.jumping ? Math.max(0.006, air) : p.jumpPrep > 0 ? -(1 - p.jumpPrep / 0.085) : air > 0.3 ? air : 0;
+        if (p.shadow) {
+          p.shadow.position.y = groundY - p.position.y + 0.02;
+          const sScale = Math.max(0.45, 1 - Math.max(0, jumpAir) * 0.35);
+          p.shadow.scale.set(sScale, sScale, 1);
+        }
+        p.rig.update(dt, p.position.x, p.position.z, p.heading, personGround, this, jumpAir);
+        p.crowd.begin();
+        p.crowd.add(p.rig, 0);
+        p.crowd.end();
+      } else if (!p._charHidden) {
+        p.rig.placed = false;
+        p.crowd.begin();
+        p.crowd.end();
+        if (p.crowd.updates > 2) {
+          if (p.mesh) p.mesh.visible = false;
+          p._charHidden = true;
+        }
+      }
+    }
 
     const b = this.entities.cyclist;
-    b.riderRig.ride(b.leanPivot, b.pedalPhase, b.bikeFrame);
-    b.riderCrowd.begin();
-    b.riderCrowd.add(b.riderRig, 0);
-    b.riderCrowd.end();
-    b.helmet.quaternion.copy(b.riderRig.headQuaternion);
-    b.helmet.position.set(0, 0.175, -0.012).applyQuaternion(b.helmet.quaternion).add(b.riderRig.headPosition);
+    if (b) {
+      const dx = focus ? b.position.x - focus.x : 0;
+      const dz = focus ? b.position.z - focus.z : 0;
+      if (this.activeMode === 'cyclist' || dx * dx + dz * dz <= maxDistSq) {
+        if (b.helmet) b.helmet.visible = true;
+        const moved =
+          this.activeMode === 'cyclist' ||
+          b._riderHidden ||
+          b._posedX !== b.position.x ||
+          b._posedY !== b.position.y ||
+          b._posedZ !== b.position.z ||
+          b._posedH !== b.heading ||
+          b._posedLean !== b.leanAngle ||
+          b._posedPedal !== b.pedalPhase;
+        b._riderHidden = false;
+        if (moved) {
+          b.riderRig.ride(b.leanPivot, b.pedalPhase, b.bikeFrame);
+          b.riderCrowd.begin();
+          b.riderCrowd.add(b.riderRig, 0);
+          b.riderCrowd.end();
+          b.helmet.quaternion.copy(b.riderRig.headQuaternion);
+          b.helmet.position.set(0, 0.175, -0.012).applyQuaternion(b.helmet.quaternion).add(b.riderRig.headPosition);
+          b._posedX = b.position.x;
+          b._posedY = b.position.y;
+          b._posedZ = b.position.z;
+          b._posedH = b.heading;
+          b._posedLean = b.leanAngle;
+          b._posedPedal = b.pedalPhase;
+        }
+      } else if (!b._riderHidden) {
+        b.riderCrowd.begin();
+        b.riderCrowd.end();
+        if (b.riderCrowd.updates > 2) {
+          if (b.helmet) b.helmet.visible = false;
+          b._riderHidden = true;
+          b._posedX = NaN;
+        }
+      }
+    }
   }
 
-  update(dt, elapsed) {
+  update(dt, elapsed, focusPos = null) {
     const heli = this.entities.helicopter;
     heli.mainRotorPivot.rotation.y += dt * 24.0;
     heli.tailRotorPivot.rotation.x += dt * 32.0;
@@ -927,12 +1104,19 @@ class ThirdPersonControllerManager {
     if (this.activeMode === 'person') {
       this.updatePerson(dt, elapsed);
     } else {
-      // Keep the sidewalk pedestrian walking naturally when not actively controlled
+      // Keep the sidewalk pedestrian walking naturally on the ground when not actively controlled
       const p = this.entities.person;
       const walkSpeed = 1.48;
+      p.prevX = p.position.x;
+      p.prevZ = p.position.z;
       p.speed = walkSpeed;
+      p.jumping = false;
+      p.jumpPrep = 0;
+      p.verticalVel = 0;
       p.position.x += Math.sin(p.heading) * walkSpeed * dt;
       p.position.z += Math.cos(p.heading) * walkSpeed * dt;
+      this.resolveHorizontalCollision(p.position, 0.48, null, p);
+      p.position.y = this.getGroundHeight(p.position.x, p.position.z, 'person');
       if (p.position.z < -340) p.heading = 0;
       else if (p.position.z > 340) p.heading = Math.PI;
     }
@@ -967,99 +1151,159 @@ class ThirdPersonControllerManager {
       bike.headLight.intensity = bikeActive ? 115 * beamScale : 0;
     }
 
-    this.poseCharacters(dt);
+    this.poseCharacters(dt, focusPos);
   }
 
   updatePerson(dt) {
+    if (dt <= 0) return;
     const p = this.entities.person;
-    const maxWalk = this.keys.boost ? 8.2 : 4.4;
+    const maxSpeed = 8.2;
     const turnRate = 2.6;
 
     let targetSpeed = 0;
-    if (this.keys.forward) targetSpeed = maxWalk * this.keys.forward;
-    else if (this.keys.backward) targetSpeed = -maxWalk * 0.65 * this.keys.backward;
+    if (this.keys.forward) targetSpeed = maxSpeed * this.keys.forward;
+    else if (this.keys.backward) targetSpeed = -maxSpeed * 0.65 * this.keys.backward;
 
     if (this.keys.left) p.heading += turnRate * dt * this.keys.left;
     if (this.keys.right) p.heading -= turnRate * dt * this.keys.right;
 
-    p.speed += (targetSpeed - p.speed) * Math.min(1, dt * 10);
+    const accelerating = Math.abs(targetSpeed) > Math.abs(p.speed) && p.speed * targetSpeed >= 0;
+    const acceleration = accelerating ? 5.5 * Math.abs(targetSpeed) / maxSpeed : 12;
+    p.speed += Math.max(-acceleration * dt, Math.min(acceleration * dt, targetSpeed - p.speed));
 
-    p.position.x += Math.sin(p.heading) * p.speed * dt;
-    p.position.z += Math.cos(p.heading) * p.speed * dt;
-    this.resolveHorizontalCollision(p.position, 0.48, p.position.y + 1.0);
+    const prevX = p.position.x;
+    const prevZ = p.position.z;
+    p.prevX = prevX;
+    p.prevZ = prevZ;
+    const sinH = Math.sin(p.heading);
+    const cosH = Math.cos(p.heading);
+    const nextX = prevX + sinH * p.speed * dt;
+    const nextZ = prevZ + cosH * p.speed * dt;
+    p.position.x = nextX;
+    p.position.z = nextZ;
+    this.resolveHorizontalCollision(p.position, 0.48, null, p);
+
+    // Prevent phantom speed buildup when blocked head-on by a building or shoreline boundary
+    if (Math.abs(p.position.x - nextX) > 1e-6 || Math.abs(p.position.z - nextZ) > 1e-6) {
+      const actualFwd = ((p.position.x - prevX) * sinH + (p.position.z - prevZ) * cosH) / dt;
+      if (p.speed > 0 && actualFwd < p.speed) p.speed = Math.max(0, actualFwd);
+      else if (p.speed < 0 && actualFwd > p.speed) p.speed = Math.min(0, actualFwd);
+    }
 
     const groundY = this.getGroundHeight(p.position.x, p.position.z, 'person');
-    if (this.keys.up && p.position.y <= groundY + 0.02) {
-      p.verticalVel = 5.2;
+    const JumpLeadTime = 0.085;
+    if (this.keys.up && p.position.y <= groundY + 0.02 && !p.jumping && !(p.jumpPrep > 0)) {
+      p.jumpPrep = JumpLeadTime;
     }
-    p.verticalVel -= 14.5 * dt;
-    p.position.y += p.verticalVel * dt;
-    if (p.position.y < groundY) {
-      p.position.y = groundY;
+    if (p.jumpPrep > 0) {
+      p.jumpPrep = Math.max(0, p.jumpPrep - dt);
+      p.position.y += (groundY - p.position.y) * (1 - Math.exp(-dt * 18));
+      if (Math.abs(groundY - p.position.y) < 1e-3) p.position.y = groundY;
+      if (p.jumpPrep === 0) {
+        p.verticalVel = 5.2;
+        p.jumping = true;
+      }
+    }
+    if (p.jumping || p.position.y > groundY + 0.3) {
+      if (p.position.y > groundY + 0.3) {
+        p.jumping = true;
+        p.jumpPrep = 0;
+      }
+      p.verticalVel -= 14.5 * dt;
+      p.position.y += p.verticalVel * dt;
+      if (p.position.y <= groundY) {
+        p.position.y = groundY;
+        p.verticalVel = 0;
+        p.jumping = false;
+      }
+    } else if (!(p.jumpPrep > 0)) {
+      // Stepping up or down ordinary 0.22 m curbs stays grounded so the IK footsteps carry the body smoothly
+      p.position.y += (groundY - p.position.y) * (1 - Math.exp(-dt * 18));
+      if (Math.abs(groundY - p.position.y) < 1e-3) p.position.y = groundY;
       p.verticalVel = 0;
+      p.jumping = false;
     }
   }
 
   updateCar(dt) {
+    if (dt <= 0) return;
     const c = this.entities.car;
-    const maxSpeed = this.keys.boost ? 36.0 : 23.5;
-    const accel = this.keys.boost ? 21.0 : 14.0;
 
     let throttle = 0;
     if (this.keys.forward) throttle = this.keys.forward;
     else if (this.keys.backward) throttle = -this.keys.backward;
 
-    if (throttle !== 0) {
-      c.speed += throttle * accel * dt;
-      c.speed = Math.max(-maxSpeed * 0.45, Math.min(maxSpeed, c.speed));
-    } else {
-      c.speed *= Math.max(0, 1 - dt * 2.8);
-      if (Math.abs(c.speed) < 0.08) c.speed = 0;
-    }
+    const braking = c.speed * throttle < 0;
 
     let steerInput = 0;
     if (this.keys.left) steerInput = this.keys.left;
     if (this.keys.right) steerInput = -this.keys.right;
 
-    c.steerAngle += (steerInput * 0.52 - c.steerAngle) * Math.min(1, dt * 10);
-
-    if (Math.abs(c.speed) > 0.2) {
-      const dirSign = c.speed >= 0 ? 1 : -1;
-      const speedFactor = Math.min(1.0, Math.abs(c.speed) / 8.0);
-      c.heading += c.steerAngle * 2.4 * speedFactor * dirSign * dt;
-    }
-
-    // Integrate collision yaw spin & lateral tire slip velocity with asphalt grip damping
-    const tireGripDamp = Math.exp(-dt * 6.8);
-    c.heading += c.angularVel * dt;
-    c.angularVel *= Math.exp(-dt * 7.8);
-
     const prevX = c.position.x;
     const prevZ = c.position.z;
-    c.position.x += (Math.sin(c.heading) * c.speed + c.vx) * dt;
-    c.position.z += (Math.cos(c.heading) * c.speed + c.vz) * dt;
-    c.vx *= tireGripDamp;
-    c.vz *= tireGripDamp;
+    c.prevX = prevX;
+    c.prevZ = prevZ;
+    // Short steps keep grip, impacts and suspension consistent at different display rates.
+    const steps = Math.ceil(dt * 120);
+    const step = dt / steps;
+    const steerResponse = 1 - Math.exp(-10 * step);
+    const yawResponse = 1 - Math.exp(-5 * step);
+    const tireResponse = 1 - Math.exp(-4 * step);
+    for (let i = 0; i < steps; i++) {
+      const sin = Math.sin(c.heading), cos = Math.cos(c.heading);
+      const vx = sin * c.speed + c.vx, vz = cos * c.speed + c.vz;
+      const forward = vx * sin + vz * cos;
+      const sideways = vx * cos - vz * sin;
+      const speed = driveSpeed(forward, throttle, step, CAR_DRIVE);
+      const acceleration = (speed - forward) / step;
+      // Braking and cornering share tire grip; air resistance does not use it.
+      const tireAcceleration = acceleration + CAR_DRIVE.drag * forward * Math.abs(forward);
+      const grip = Math.sqrt(Math.max(0, CAR_DRIVE.grip ** 2 - tireAcceleration ** 2));
+      // A handbrake slide preserves steering while reducing lateral grip; fade it out at low speed.
+      const handbrake = forward * throttle < 0 ? Math.abs(throttle) * Math.min(1, Math.abs(forward) / 5) : 0;
+      const lateralGrip = grip * (1 - 0.7 * handbrake);
+      const steeringGrip = grip + (CAR_DRIVE.grip - grip) * handbrake;
 
-    this.resolveHorizontalCollision(c.position, 1.35, 1.0, c);
+      // Full lock at parking speeds, progressively less steering at road speeds.
+      const turn = CAR_DRIVE.wheelbase * CAR_DRIVE.cornering;
+      const maxSteer = Math.atan(turn / Math.max(speed * speed, turn / Math.tan(0.60)));
+      c.steerAngle += (steerInput * maxSteer - c.steerAngle) * steerResponse;
+      const yawLimit = steeringGrip / Math.max(2, Math.abs(speed));
+      const targetYaw = Math.max(-yawLimit, Math.min(yawLimit, speed * Math.tan(c.steerAngle) / CAR_DRIVE.wheelbase));
+      // Collision spin remains part of the yaw velocity; the tires gradually regain control.
+      const yawStep = steeringGrip * 0.65 * step;
+      c.angularVel += Math.max(-yawStep, Math.min(yawStep, (targetYaw - c.angularVel) * yawResponse));
+      c.heading += c.angularVel * step;
+
+      // Turning the chassis must not instantly rotate its momentum. Tires remove sideways slip
+      // with a bounded force; longitudinal momentum, including impacts, stays in speed.
+      const nextSin = Math.sin(c.heading), nextCos = Math.cos(c.heading);
+      const worldX = sin * speed + cos * sideways;
+      const worldZ = cos * speed - sin * sideways;
+      c.speed = worldX * nextSin + worldZ * nextCos;
+      const slip = worldX * nextCos - worldZ * nextSin;
+      const correction = Math.max(-lateralGrip * step, Math.min(lateralGrip * step, -slip * tireResponse));
+      c.vx = nextCos * (slip + correction);
+      c.vz = -nextSin * (slip + correction);
+      c.position.x += (nextSin * c.speed + c.vx) * step;
+      c.position.z += (nextCos * c.speed + c.vz) * step;
+      this.resolveHorizontalCollision(c.position, 1.35, c);
+
+      const targetPitch = -Math.max(-1, Math.min(1, acceleration / CAR_DRIVE.acceleration)) * 0.026;
+      const targetRoll = Math.max(-0.09, Math.min(0.09, correction / step * 0.012));
+      c.pitchVel += ((targetPitch - c.chassisPivot.rotation.x) * 68 - c.pitchVel * 11.2) * step;
+      c.rollVel += ((targetRoll - c.chassisPivot.rotation.z) * 68 - c.rollVel * 11.2) * step;
+      c.chassisPivot.rotation.x = Math.max(-0.22, Math.min(0.22, c.chassisPivot.rotation.x + c.pitchVel * step));
+      c.chassisPivot.rotation.z = Math.max(-0.26, Math.min(0.26, c.chassisPivot.rotation.z + c.rollVel * step));
+      c.heaveVel += (-c.heaveY * 85 - c.heaveVel * 12) * step;
+      c.heaveY = Math.max(-0.08, Math.min(0.14, c.heaveY + c.heaveVel * step));
+    }
     c.position.y = this.getGroundHeight(c.position.x, c.position.z, 'car');
-
-    // 3-DOF Spring-Damper Chassis Suspension (Pitch, Roll & Vertical Heave)
-    const targetPitch = -throttle * 0.026;
-    const targetRoll = -c.steerAngle * (c.speed / maxSpeed) * 0.092;
-    const springK = 68.0;
-    const dampC = 11.2;
-    c.pitchVel += ((targetPitch - c.chassisPivot.rotation.x) * springK - c.pitchVel * dampC) * dt;
-    c.rollVel += ((targetRoll - c.chassisPivot.rotation.z) * springK - c.rollVel * dampC) * dt;
-    c.chassisPivot.rotation.x = Math.max(-0.22, Math.min(0.22, c.chassisPivot.rotation.x + c.pitchVel * dt));
-    c.chassisPivot.rotation.z = Math.max(-0.26, Math.min(0.26, c.chassisPivot.rotation.z + c.rollVel * dt));
-
-    c.heaveVel += (-c.heaveY * 85.0 - c.heaveVel * 12.0) * dt;
-    c.heaveY = Math.max(-0.08, Math.min(0.14, c.heaveY + c.heaveVel * dt));
     c.chassisPivot.position.y = c.heaveY;
 
     if (c.carState) {
-      c.carState.value.x = throttle < 0 || Math.abs(c.speed) < 0.6 ? 1 : 0;
+      c.carState.value.x = braking ? 1 : 0;
+      c.carState.value.w = c.speed < -0.2 ? 1 : 0;
     }
 
     const forwardDist = (c.position.x - prevX) * Math.sin(c.heading) + (c.position.z - prevZ) * Math.cos(c.heading);
@@ -1075,20 +1319,28 @@ class ThirdPersonControllerManager {
   }
 
   updateCyclist(dt) {
+    if (dt <= 0) return;
     const b = this.entities.cyclist;
-    const maxSpeed = this.keys.boost ? 19.0 : 12.8;
-    const accel = this.keys.boost ? 13.5 : 9.0;
 
+    const handbrake = b.speed > 0 ? +this.keys.up : 0;
     let throttle = 0;
-    if (this.keys.forward) throttle = this.keys.forward;
-    else if (this.keys.backward) throttle = -0.6 * this.keys.backward;
+    if (handbrake) throttle = -handbrake;
+    else if (this.keys.forward) throttle = +this.keys.forward;
+    else if (this.keys.backward) throttle = b.speed > 0 ? -this.keys.backward : -0.6 * this.keys.backward;
 
-    if (throttle !== 0) {
-      b.speed += throttle * accel * dt;
-      b.speed = Math.max(-4.5, Math.min(maxSpeed, b.speed));
+    // Pause briefly at zero after braking from forward travel so holding S stops cleanly before backing up
+    if (b.speed > 0 && throttle < 0) {
+      b.speed = driveSpeed(b.speed, throttle, dt, BICYCLE_DRIVE);
+      if (b.speed < 0.05) {
+        b.speed = 0;
+        if (!handbrake) b._brakeHold = 0.25;
+      }
+    } else if (!handbrake && b._brakeHold > 0 && throttle < 0) {
+      b._brakeHold = Math.max(0, b._brakeHold - dt);
+      b.speed = 0;
     } else {
-      b.speed *= Math.max(0, 1 - dt * 2.4);
-      if (Math.abs(b.speed) < 0.05) b.speed = 0;
+      b._brakeHold = 0;
+      b.speed = driveSpeed(b.speed, throttle, dt, BICYCLE_DRIVE);
     }
 
     let turnInput = 0;
@@ -1100,9 +1352,22 @@ class ThirdPersonControllerManager {
       b.heading += turnInput * 2.15 * dirSign * dt;
     }
 
-    b.position.x += Math.sin(b.heading) * b.speed * dt;
-    b.position.z += Math.cos(b.heading) * b.speed * dt;
-    this.resolveHorizontalCollision(b.position, 0.65, 1.0);
+    const prevX = b.position.x;
+    const prevZ = b.position.z;
+    const sinH = Math.sin(b.heading);
+    const cosH = Math.cos(b.heading);
+    const nextX = prevX + sinH * b.speed * dt;
+    const nextZ = prevZ + cosH * b.speed * dt;
+    b.position.x = nextX;
+    b.position.z = nextZ;
+    this.resolveHorizontalCollision(b.position, 0.65, null, b);
+
+    // Prevent phantom speed buildup when blocked head-on by a building or shoreline boundary
+    if (Math.abs(b.position.x - nextX) > 1e-6 || Math.abs(b.position.z - nextZ) > 1e-6) {
+      const actualFwd = ((b.position.x - prevX) * sinH + (b.position.z - prevZ) * cosH) / dt;
+      if (b.speed > 0 && actualFwd < b.speed) b.speed = Math.max(0, actualFwd);
+      else if (b.speed < 0 && actualFwd > b.speed) b.speed = Math.min(0, actualFwd);
+    }
     b.position.y = this.getGroundHeight(b.position.x, b.position.z, 'cyclist');
 
     const targetLean = -turnInput * Math.min(1.0, Math.abs(b.speed) / 9.0) * 0.34;
@@ -1122,7 +1387,7 @@ class ThirdPersonControllerManager {
 
   updateHelicopter(dt, elapsed) {
     const h = this.entities.helicopter;
-    const maxHorizSpeed = this.keys.boost ? 52.0 : 32.0;
+    const maxHorizSpeed = 52.0;
     const maxVertSpeed = 16.0;
 
     let fwdInput = 0;
@@ -1157,8 +1422,11 @@ class ThirdPersonControllerManager {
     h.position.z += Math.cos(h.heading) * h.speed * dt;
     h.position.y += h.verticalSpeed * dt;
 
+    if (h.position.y < 0.25) {
+      this.reportCollision(h, groundCollider, 'ground', h.position.x, 0.25, h.position.z, 0, 1, 0, -h.verticalSpeed);
+    }
     h.position.y = Math.max(0.25, Math.min(380, h.position.y));
-    this.resolveHorizontalCollision(h.position, 4.5, h.position.y);
+    this.resolveHorizontalCollision(h.position, 4.5, null, h);
 
     const targetPitch = (h.speed / maxHorizSpeed) * 0.24;
     const targetRoll = -yawInput * 0.28;
@@ -1171,5 +1439,4 @@ class ThirdPersonControllerManager {
   }
 }
 
-Object.assign(window.NYC, { ThirdPersonControllerManager });
-})();
+export { ThirdPersonControllerManager };

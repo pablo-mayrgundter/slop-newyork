@@ -1,26 +1,58 @@
-(function () {
-// js/lighting.js
-// Physically-Based Atmospheric Sky (Preetham SkyMesh + Beer-Powder Clouds),
-// Live PMREMGenerator IBL Cubemap, Three.js r186 SunLight (2-Cascade CSM),
-// and Occlusion-Aware Urban Canyon Global Illumination for Three.js r186 WebGPURenderer
+import * as THREE from 'three/webgpu';
+import {
+  Fn,
+  float,
+  vec3,
+  vec4,
+  uniform,
+  mix,
+  fog,
+  pmremTexture,
+  positionWorld,
+  cameraPosition,
+  length,
+  normalize,
+  max,
+  exp,
+  abs,
+  select
+} from 'three/tsl';
+import { SkyMesh } from 'three/addons/objects/SkyMesh.js';
+import { SunLight } from 'three/addons/lights/SunLight.js';
+import { SunLightNode } from 'three/addons/lights/SunLightNode.js';
+import { cityUniforms } from './tsl-materials.js';
 
-const { THREE } = window.NYC;
-const {
-  Fn, float, vec3, vec4, uniform, mix, fog, pmremTexture, positionWorld, cameraPosition, length, normalize, max, exp, abs, select
-} = window.NYC.TSL;
-const { SkyMesh } = window.NYC.Addons;
-const { SunLight } = window.NYC.Addons;
-const { SunLightNode } = window.NYC.Addons;
-const { cityUniforms } = window.NYC;
+// Atmospheric sky, environment lighting, sunlight and time-of-day presets.
+
+// The sun and moon sit where they really are over New York (40.7° N) on one day in late May / mid-July, when the
+// low evening sun lines up with the cross streets ("Manhattanhenge"). Positions are an elevation above the horizon
+// and a compass bearing in degrees from true north; the street grid, and with it the world's -z axis, points 29°
+// east of true north.
+const GRID_BEARING = 29.02;
+function skyDirection(elevation, bearing) {
+  const el = elevation * Math.PI / 180;
+  const az = (bearing - GRID_BEARING) * Math.PI / 180;
+  return new THREE.Vector3(Math.cos(el) * Math.sin(az), Math.sin(el), -Math.cos(el) * Math.cos(az));
+}
+
+// Earth's atmosphere (SkyMesh's Earth preset); only the aerosol haze changes over the day
+const RAYLEIGH = 3;
+const MIE_DIRECTIONAL_G = 0.7;
+
+// SkyMesh's sky fades to black about 2° below the horizon, well before twilight ends. A sun lower than this draws
+// the sky as it looks just after sunset: the last glow in the west, brightened by the preset's skyExposure, over the
+// twilight blue of the glow layer.
+const SKY_SUN_MIN_Y = Math.sin(-1.5 * Math.PI / 180);
+
+// The cascades reach upstream far enough for a 550 m tower's shadow down to this sun elevation (golden hour is 6°)
+const SHADOW_MIN_SUN_Y = Math.sin(5 * Math.PI / 180);
 
 const TIME_PRESETS = {
   golden: {
     id: 'golden',
-    name: 'Golden Hour · 17:45',
-    // Crisp Manhattan canyon sun slicing across avenues & intersections so buildings, cars, trees & pedestrians cast sharp shadows
-    sunDir: new THREE.Vector3(-0.44, 0.58, -0.68).normalize(),
-    sunColor: 0xffca92,
-    sunIntensity: 5.8,
+    sunDir: skyDirection(6, 299), // 19:50, straight down the cross streets
+    lightColor: 0xffbb78, // the sun through 9 air masses
+    lightIntensity: 5.0,
     hemiSky: 0x9abbe6,
     hemiGround: 0xc88a62, // Warm terracotta / limestone upward canyon bounce
     hemiIntensity: 1.48,
@@ -32,21 +64,19 @@ const TIME_PRESETS = {
     roadWetness: 0.28,
     envIntensity: 0.54,
     canyonBounce: 0.52,
-    turbidity: 8.0,
-    rayleigh: 2.8,
-    mieCoefficient: 0.008,
-    mieDirectionalG: 0.88,
+    mieCoefficient: 0.03, // the evening haze
     cloudCoverage: 0.36,
     cloudDensity: 0.38,
-    skyExposure: 0.148,
-    nightFactor: 0.0
+    skyExposure: 0.25,
+    nightFactor: 0.0,
+    glowZenith: 0x000000,
+    glowHorizon: 0x000000
   },
   midday: {
     id: 'midday',
-    name: 'Sunny Midday · 13:30',
-    sunDir: new THREE.Vector3(-0.34, 0.82, -0.46).normalize(),
-    sunColor: 0xfff5e8,
-    sunIntensity: 6.6,
+    sunDir: skyDirection(71, 180), // solar noon, 12:57
+    lightColor: 0xfff5e8,
+    lightIntensity: 6.6,
     hemiSky: 0xaad2ff,
     hemiGround: 0xb89678, // Warm sunlit masonry & pavement bounce
     hemiIntensity: 1.58,
@@ -58,66 +88,63 @@ const TIME_PRESETS = {
     roadWetness: 0.08,
     envIntensity: 0.58,
     canyonBounce: 0.58,
-    turbidity: 6.5,
-    rayleigh: 2.4,
-    mieCoefficient: 0.006,
-    mieDirectionalG: 0.86,
+    mieCoefficient: 0.025,
     cloudCoverage: 0.32,
     cloudDensity: 0.35,
-    skyExposure: 0.142,
-    nightFactor: 0.0
+    skyExposure: 0.11,
+    nightFactor: 0.0,
+    glowZenith: 0x000000,
+    glowHorizon: 0x000000
   },
   twilight: {
     id: 'twilight',
-    name: 'Blue Hour · 19:15',
-    sunDir: new THREE.Vector3(-0.52, 0.36, -0.77).normalize(),
-    sunColor: 0xff9466,
-    sunIntensity: 3.1,
+    sunDir: skyDirection(-5, 305), // 20:55, civil twilight: no direct sunlight, only the sky
+    moonDir: skyDirection(8, 125), // the full moon rising
+    lightColor: 0x8cb0e8,
+    lightIntensity: 0.0, // moonlight is lost in the twilight
     hemiSky: 0x4c6ca8,
     hemiGround: 0x6e5048,
-    hemiIntensity: 0.85,
+    hemiIntensity: 1.3,
     skyTop: 0x102248,
     skyHorizon: 0xb86b6c,
     fogColor: 0x353c58,
     fogDensity: 0.00032,
     interiorGlow: 1.25,
     roadWetness: 0.55,
-    envIntensity: 0.36,
+    envIntensity: 0.5,
     canyonBounce: 0.32,
-    turbidity: 9.5,
-    rayleigh: 3.4,
-    mieCoefficient: 0.010,
-    mieDirectionalG: 0.90,
+    mieCoefficient: 0.03,
     cloudCoverage: 0.40,
     cloudDensity: 0.42,
-    skyExposure: 0.115,
-    nightFactor: 0.28
+    skyExposure: 8.0,
+    nightFactor: 0.0,
+    glowZenith: 0x22386e, // the twilight blue
+    glowHorizon: 0x3a4c80
   },
   midnight: {
     id: 'midnight',
-    name: 'Manhattan Night · 23:00',
-    sunDir: new THREE.Vector3(0.42, 0.68, -0.60).normalize(),
-    sunColor: 0x8cb0e8,
-    sunIntensity: 1.45,
-    hemiSky: 0x263a62,
+    sunDir: skyDirection(-20, 335), // 23:00
+    moonDir: skyDirection(22, 165), // a full moon, low in the south
+    lightColor: 0x8cb0e8,
+    lightIntensity: 0.5, // faint next to the street lights
+    hemiSky: 0x3b3a44, // the light-polluted sky
     hemiGround: 0x382e36,
     hemiIntensity: 0.72,
-    skyTop: 0x060c1a,
-    skyHorizon: 0x182640,
-    fogColor: 0x0c1424,
+    skyTop: 0x10131a,
+    skyHorizon: 0x3a3029,
+    fogColor: 0x1a1816,
     fogDensity: 0.00036,
     interiorGlow: 1.55,
     roadWetness: 0.62,
     envIntensity: 0.30,
     canyonBounce: 0.18,
-    turbidity: 4.0,
-    rayleigh: 1.5,
-    mieCoefficient: 0.004,
-    mieDirectionalG: 0.80,
+    mieCoefficient: 0.025,
     cloudCoverage: 0.22,
     cloudDensity: 0.25,
     skyExposure: 0.022,
-    nightFactor: 0.86
+    nightFactor: 1.0, // no sunlit sky at all, only the city's glow
+    glowZenith: 0x14161d,
+    glowHorizon: 0x54473b
   }
 };
 
@@ -128,17 +155,11 @@ class LightingSystem {
   // and the aerial fog to its host; the sky still bakes the IBL environment either way
   constructor(scene, renderer = null, options = {}) {
     this.scene = scene;
-    this.renderer = renderer;
     this.activePresetId = 'golden';
     this.drawSky = options.sky !== false;
     this.drawFog = options.fog !== false;
 
-    // Assign SunLight its node implementation for WebGPURenderer (Light.registerNode since r187; r186 used the library)
-    if (SunLight.registerNode) {
-      SunLight.registerNode(SunLightNode);
-    } else if (renderer && renderer.library) {
-      renderer.library.addLight(SunLightNode, SunLight);
-    }
+    SunLight.registerNode(SunLightNode);
 
     if (this.drawFog) this.scene.fog = new THREE.FogExp2(0xdcc5ae, 0.00024);
     // Leave scene.background = null because SkyMesh renders the 360° sky dome, and setting
@@ -151,10 +172,9 @@ class LightingSystem {
     // whatever its size)
     this.sky = new SkyMesh();
     this.sky.scale.setScalar(200000);
-    this.sky.turbidity.value = 8.0;
-    this.sky.rayleigh.value = 2.8;
-    this.sky.mieCoefficient.value = 0.008;
-    this.sky.mieDirectionalG.value = 0.88;
+    this.sky.rayleigh.value = RAYLEIGH;
+    this.sky.mieCoefficient.value = TIME_PRESETS.golden.mieCoefficient;
+    this.sky.mieDirectionalG.value = MIE_DIRECTIONAL_G;
     this.sky.cloudScale.value = 0.00018;
     this.sky.cloudSpeed.value = 0.000015;
     this.sky.cloudCoverage.value = 0.36;
@@ -164,47 +184,57 @@ class LightingSystem {
     // Calibrate SkyMesh raw radiance (EE=1000 * 0.04) into standard exposure=1.0 HDR range
     this.uSkyExposure = uniform(0.148);
     this.uNightFactor = uniform(0.0);
-    this.uNightSkyColor = uniform(new THREE.Color(0x0b1528));
+    // The sky light SkyMesh leaves out, added under it: its single scattering misses the deep blue that fills the
+    // twilight sky, and Manhattan's night sky is light-polluted (a dull warm glow along the horizon, darker overhead)
+    this.uGlowZenith = uniform(new THREE.Color(0x000000));
+    this.uGlowHorizon = uniform(new THREE.Color(0x000000));
     const rawSkyNode = this.sky.material.colorNode;
     this.sky.material.colorNode = Fn(() => {
       const raw = rawSkyNode;
       const dayCol = raw.rgb.mul(this.uSkyExposure);
-      const finalSky = mix(dayCol, this.uNightSkyColor, this.uNightFactor);
+      const down = float(1.0).sub(max(normalize(positionWorld.sub(cameraPosition)).y, 0.0));
+      const glow = mix(this.uGlowZenith, this.uGlowHorizon, down.mul(down).mul(down).mul(down));
+      const finalSky = dayCol.mul(float(1.0).sub(this.uNightFactor)).add(glow);
       return vec4(finalSky, float(1.0));
     })();
 
-    // In reversedDepthBuffer mode ([1..0]), camera.far is z = 0.0 (whereas SkyMesh defaults to z = w)
-    if (renderer && renderer.reversedDepthBuffer) {
-      const rawSkyVertexNode = this.sky.material.vertexNode;
-      this.sky.material.vertexNode = Fn(() => {
-        const pos = rawSkyVertexNode.toVar();
-        pos.z.assign(0.0);
-        return pos;
-      })();
-    }
-
     if (this.drawSky) this.scene.add(this.sky);
 
-    // Reusable PMREMGenerator & offscreen envScene (mirrors webgpu_generator_city.html)
+    // Reuse the environment scene and PMREM generator when the lighting preset changes.
     this.pmremGenerator = renderer ? new THREE.PMREMGenerator(renderer) : null;
     this.envScene = new THREE.Scene();
     this.envRenderTarget = null;
 
-    // Three.js r186 SunLight with automatic 2-Cascade Shadow Map (SunLightShadow + SunShadowNode)
-    // Shines from its position vector toward the origin (no .target needed)
-    this.sunLight = new SunLight(0xffca92, 5.8);
+    // Two-cascade sunlight (the moon at night) points from its position toward the origin; no target object is needed.
+    this.sunLight = new SunLight(TIME_PRESETS.golden.lightColor, TIME_PRESETS.golden.lightIntensity);
     this.sunLight.position.copy(TIME_PRESETS.golden.sunDir);
     this.sunLight.castShadow = true;
-    // 3072x3072 per cascade = 6144x3072 2-cascade shadow atlas (an 8192x4096 one cost ~20% fps and caused hitches),
-    // 2048 where the device allows less. The near cascade spans ~0.35-80 m of the view at street level (see update)
-    const maxTex = (renderer && renderer.backend && renderer.backend.device && renderer.backend.device.limits.maxTextureDimension2D) || 4096;
-    const tile = maxTex >= 6144 ? 3072 : 2048;
+    // Two cascades share a 4096x2048 atlas (2048px tiles), cutting shadow-map texel fill by 56% vs 3072px tiles.
+    const tile = 2048;
     this.sunLight.shadow.mapSize.set(tile, tile);
     this.sunLight.shadow.camera.near = 0.5;
-    this.sunLight.shadow.camera.far = 300;
+    this.sunLight.shadow.camera.far = 220;
     // Suppress shadow acne along the surface normal in world units
     // so short casters like cars, curbs, tree trunks, and pedestrians keep crisp contact shadows
     this.sunLight.shadow.normalBias = 0.05;
+    // SunLightShadow raises its caster ceiling by camera.far (220 m), which slices tall skyscrapers (up to One WTC
+    // at 541 m) when their shadows reach several blocks downstream. Shift each cascade camera upstream along its
+    // local +Z (sun) axis so every Manhattan tower stays in front of the cascade near plane, for suns down to 5°
+    // (a 550 m tower's shadow then reaches 6.3 km).
+    const origUpdateMatrices = this.sunLight.shadow.updateMatrices;
+    this.sunLight.shadow.updateMatrices = function (light, viewCamera) {
+      if (viewCamera === undefined) return;
+      origUpdateMatrices.call(this, light, viewCamera);
+      const extra = Math.ceil(550 / Math.max(SHADOW_MIN_SUN_Y, this.getCamera(0).matrixWorld.elements[9]));
+      for (let i = 0; i < this.getViewportCount(); i++) {
+        const cam = this.getCamera(i);
+        cam.translateZ(extra);
+        cam.far += extra;
+        cam.updateProjectionMatrix();
+        cam.updateMatrixWorld();
+        this._updateMatrix(cam, this._matrices[i], this._frustums[i], this._viewports[i]);
+      }
+    };
     this.scene.add(this.sunLight);
 
     // Subtle Hemisphere Sky + Warm Terracotta/Limestone Ground Bounce Fill
@@ -228,7 +258,7 @@ class LightingSystem {
     const dist = length(toFrag);
     const dir = toFrag.div(max(dist, 0.001));
     const horizonDir = normalize(vec3(dir.x, max(dir.y, 0.015), dir.z));
-    const skyColor = pmremTexture(this.envRenderTarget.texture, horizonDir, float(0.3)).rgb;
+    const skyColor = pmremTexture(this.envRenderTarget.texture, horizonDir, float(0.0)).rgb;
     // Mean haze density exp(-y / H) along the ray between the fragment and the camera
     const H = this.uFogHeight;
     const ya = max(positionWorld.y, 0.0);
@@ -264,9 +294,11 @@ class LightingSystem {
     }
     this.activePresetId = p.id;
 
-    this.sunLight.color.setHex(p.sunColor);
-    this.sunLight.intensity = p.sunIntensity;
-    this.sunLight.position.copy(p.sunDir);
+    // The directional light is the sun by day and the moon once the sun has set
+    const lightDir = p.moonDir || p.sunDir;
+    this.sunLight.color.setHex(p.lightColor);
+    this.sunLight.intensity = p.lightIntensity;
+    this.sunLight.position.copy(lightDir);
     this.sunLight.updateMatrixWorld();
 
     this.hemiLight.color.setHex(p.hemiSky);
@@ -280,45 +312,53 @@ class LightingSystem {
     if (this.uFogDensity) this.uFogDensity.value = p.fogDensity;
 
     // Update physical Preetham SkyMesh uniforms
-    this.sky.turbidity.value = p.turbidity;
-    this.sky.rayleigh.value = p.rayleigh;
     this.sky.mieCoefficient.value = p.mieCoefficient;
-    this.sky.mieDirectionalG.value = p.mieDirectionalG;
     this.sky.cloudCoverage.value = p.cloudCoverage;
     this.sky.cloudDensity.value = p.cloudDensity;
-    this.sky.sunPosition.value.copy(p.sunDir);
+    const skySun = this.sky.sunPosition.value.copy(p.sunDir);
+    if (skySun.y < SKY_SUN_MIN_Y) {
+      const k = Math.sqrt(1 - SKY_SUN_MIN_Y * SKY_SUN_MIN_Y) / Math.hypot(skySun.x, skySun.z);
+      skySun.set(skySun.x * k, SKY_SUN_MIN_Y, skySun.z * k);
+    }
     this.uSkyExposure.value = p.skyExposure;
     this.uNightFactor.value = p.nightFactor;
+    this.uGlowZenith.value.setHex(p.glowZenith);
+    this.uGlowHorizon.value.setHex(p.glowHorizon);
 
-    cityUniforms.uSunColor.value.setHex(p.sunColor);
+    // The faked reflections glint with the direct light, dimmed with it (none in the twilight)
+    cityUniforms.uSunColor.value.setHex(p.lightColor).multiplyScalar(Math.min(1, p.lightIntensity));
     cityUniforms.uSkyTopColor.value.setHex(p.skyTop);
     cityUniforms.uSkyHorizonColor.value.setHex(p.skyHorizon);
-    cityUniforms.uSkySunDir.value.copy(p.sunDir);
+    cityUniforms.uSkySunDir.value.copy(lightDir);
     cityUniforms.uInteriorGlow.value = p.interiorGlow;
     cityUniforms.uRoadWetness.value = p.roadWetness;
-    if (cityUniforms.uCanyonBounce) {
-      cityUniforms.uCanyonBounce.value = p.canyonBounce;
-    }
+    cityUniforms.uCanyonBounce.value = p.canyonBounce;
 
     this.scene.environmentIntensity = p.envIntensity;
     this.bakeEnvironmentMap();
   }
 
-  // A sun direction from outside (a host engine's real sun, y up): the preset for its elevation sets the colours, the
-  // direction itself moves the sun light, the sky and the facade reflections. Under the horizon the midnight preset keeps
-  // its own (moonlit) direction; just above it the light is held 3° up so it never shines from under the streets. The
-  // environment map re-bakes only when the preset changes or the sun has moved more than ~2° since the last bake.
+  // A sun direction from outside (a host engine's real sun, y up): the preset for its elevation sets the colours, and the
+  // direction itself moves the sky and, by day, the sun light and the facade reflections. After sunset the presets light
+  // the city from their own moon (moonDir), which stays; just above the horizon the sun light is held 3° up so it never
+  // shines from under the streets. The environment map re-bakes only when the preset changes or the sun has moved more
+  // than ~2° since the last bake.
   setSunDirection(dir) {
     const d = _sunDir.copy(dir).normalize();
     const presetId = d.y < -0.1 ? 'midnight' : d.y < 0.07 ? 'twilight' : d.y < 0.5 ? 'golden' : 'midday';
     this.applyPreset(presetId); // a no-op unless the preset changes
-    if (presetId === 'midnight') return;
-    if (d.y < 0.05) d.set(d.x, 0, d.z).normalize().multiplyScalar(Math.cos(0.05)).setY(Math.sin(0.05));
-    this.sunLight.position.copy(d);
-    this.sunLight.updateMatrixWorld();
-    this.sky.sunPosition.value.copy(d);
-    cityUniforms.uSkySunDir.value.copy(d);
-    if (!this.bakedSunDir || this.bakedSunDir.dot(d) < 0.9994) this.bakeEnvironmentMap();
+    const skySun = this.sky.sunPosition.value.copy(d);
+    if (skySun.y < SKY_SUN_MIN_Y) {
+      const k = Math.sqrt(1 - SKY_SUN_MIN_Y * SKY_SUN_MIN_Y) / Math.hypot(skySun.x, skySun.z);
+      skySun.set(skySun.x * k, SKY_SUN_MIN_Y, skySun.z * k);
+    }
+    if (!TIME_PRESETS[presetId].moonDir) {
+      if (d.y < 0.05) d.set(d.x, 0, d.z).normalize().multiplyScalar(Math.cos(0.05)).setY(Math.sin(0.05));
+      this.sunLight.position.copy(d);
+      this.sunLight.updateMatrixWorld();
+      cityUniforms.uSkySunDir.value.copy(d);
+    }
+    if (!this.bakedSunDir || this.bakedSunDir.dot(skySun) < 0.9994) this.bakeEnvironmentMap();
   }
 
   update(focusPos) {
@@ -327,9 +367,8 @@ class LightingSystem {
     // logarithmic split (the near cascade ends at ~far / 4). Keep far at 300 m at street level so the near cascade
     // stays sharp, and expand it with altitude (helicopter / observatory) so shadows reach all the way down to street level.
     const altitude = focusPos && Number.isFinite(focusPos.y) ? Math.max(0, focusPos.y) : 0;
-    this.sunLight.shadow.camera.far = Math.max(300, Math.min(720, 260 + altitude * 1.6));
+    this.sunLight.shadow.camera.far = Math.max(220, Math.min(600, 200 + altitude * 1.5));
   }
 }
 
-Object.assign(window.NYC, { LightingSystem });
-})();
+export { LightingSystem };

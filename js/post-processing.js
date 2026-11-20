@@ -1,8 +1,24 @@
-(function () {
+import * as THREE from 'three/webgpu';
+import {
+  Fn,
+  uniform,
+  float,
+  vec2,
+  vec3,
+  vec4,
+  dot,
+  mix,
+  min,
+  max,
+  pow,
+  smoothstep,
+  length,
+  screenUV,
+  screenSize
+} from 'three/tsl';
+import { bloom } from 'three/addons/tsl/display/BloomNode.js';
+
 // Scene-linear color grading and lens bloom, composed in the existing final render pass.
-const { THREE } = window.NYC;
-const { Fn, uniform, float, vec2, vec3, vec4, dot, mix, min, max, pow, smoothstep, length, screenUV, screenSize } = window.NYC.TSL;
-const { bloom } = window.NYC.PostFX;
 
 // Exposure and white balance belong to the camera, independently of the physical lighting presets.
 // Keep exposure restrained for ACES; stronger bloom stays selective so midtones retain their contrast.
@@ -31,7 +47,7 @@ function createPostProcessing(renderer, sceneColor, reflections) {
   const bloomInput = vec4(exposed.mul(float(8.0).div(max(peak, 8.0))), 1.0);
   const bloomPass = bloom(bloomInput, 0.24, 0.40, 1.20);
   bloomPass.smoothWidth.value = 0.30;
-  bloomPass.setResolutionScale(0.5);
+  bloomPass.setResolutionScale(0.35);
 
   const outputNode = Fn(() => {
     const color = exposed.add(bloomPass.rgb).toVar();
@@ -67,8 +83,7 @@ function createPostProcessing(renderer, sceneColor, reflections) {
   }
 
   applyPreset('golden');
-  return { outputNode, bloomPass, applyPreset, exposure, contrast, saturation, balance };
+  return { outputNode, applyPreset };
 }
 
-Object.assign(window.NYC, { createPostProcessing });
-})();
+export { createPostProcessing };
